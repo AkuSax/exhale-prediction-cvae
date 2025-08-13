@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda environment
+/exhale_pred/
+
+# Data Files
+*.npy
+*.nii.gz
+
+# Saved Models
+*.pth
+*.pt
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
