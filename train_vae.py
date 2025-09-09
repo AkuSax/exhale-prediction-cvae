@@ -118,44 +118,51 @@ class ResidualBlock(nn.Module):
         out += identity
         return self.relu(out)
 
-class VAE3D(nn.Module):
+class VAE2D(nn.Module):
     def __init__(self, latent_dim):
-        super(VAE3D, self).__init__()
-        self.encoder_conv = nn.Sequential(
-            nn.Conv3d(1, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),
-            ResidualBlock(64, 128, stride=2),
-            ResidualBlock(128, 256, stride=2),
-            ResidualBlock(256, 512, stride=2),
-            ResidualBlock(512, 512, stride=2),
-            ResidualBlock(512, 1024, stride=2),
-            nn.Flatten()
-        )
-        self.fc_mu = nn.Linear(1024 * 2 * 2 * 2, latent_dim)
-        self.fc_logvar = nn.Linear(1024 * 2 * 2 * 2, latent_dim)
-        self.decoder_input = nn.Linear(latent_dim, 1024 * 2 * 2 * 2)
+        super(VAE2D, self).__init__()
+        # Use a pre-trained ResNet18 as the encoder backbone
+        resnet = resnet18(weights=None)
+        # Adapt ResNet for single-channel input
+        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.encoder = nn.Sequential(*list(resnet.children())[:-1], nn.Flatten())
+        
+        self.fc_mu = nn.Linear(512, latent_dim)
+        self.fc_logvar = nn.Linear(512, latent_dim)
+
+        self.decoder_input = nn.Linear(latent_dim, 512)
         self.decoder = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
-            nn.Conv3d(1024, 512, kernel_size=3, padding=1), nn.ReLU(),
-            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
-            nn.Conv3d(512, 256, kernel_size=3, padding=1), nn.ReLU(),
-            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
-            nn.Conv3d(256, 128, kernel_size=3, padding=1), nn.ReLU(),
-            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
-            nn.Conv3d(128, 64, kernel_size=3, padding=1), nn.ReLU(),
-            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
-            nn.Conv3d(64, 32, kernel_size=3, padding=1), nn.ReLU(),
-            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
-            nn.Conv3d(32, 1, kernel_size=3, padding=1), nn.Sigmoid()
+            nn.Unflatten(1, (512, 1, 1)),
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1), nn.ReLU(), # 2x2 -> 4x4
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1), nn.ReLU(), # 4x4 -> 8x8
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 8x8 -> 16x16
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1), nn.ReLU(),   # 16x16 -> 32x32
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1), nn.ReLU(),   # 32x32 -> 64x64
+            nn.ConvTranspose2d(16, 1, kernel_size=4, stride=2, padding=1), nn.Sigmoid()# 64x64 -> 128x128 -> THIS IS A MISTAKE! The target is 256x256. This needs another layer.
+            # Correcting this live.
         )
+        # Corrected decoder
+        self.decoder = nn.Sequential(
+            nn.Unflatten(1, (512, 1, 1)), # 1x1
+            nn.ConvTranspose2d(512, 512, kernel_size=4, stride=1, padding=0), nn.ReLU(), # 4x4
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1), nn.ReLU(), # 8x8
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1), nn.ReLU(), # 16x16
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 32x32
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1), nn.ReLU(),   # 64x64
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1), nn.ReLU(),   # 128x128
+            nn.ConvTranspose2d(16, 1, kernel_size=4, stride=2, padding=1), nn.Sigmoid()  # 256x256
+        )
+
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
+
     def forward(self, x):
-        h = self.encoder_conv(x)
+        h = self.encoder(x)
         mu, logvar = self.fc_mu(h), self.fc_logvar(h)
         z = self.reparameterize(mu, logvar)
-        z_reshaped = self.decoder_input(z).view(-1, 1024, 2, 2, 2)
+        z_reshaped = self.decoder_input(z)
         return self.decoder(z_reshaped), mu, logvar
 
 class LungDataset(Dataset):
