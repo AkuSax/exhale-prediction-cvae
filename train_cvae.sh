@@ -1,17 +1,22 @@
 #!/bin/bash
-# Script to configure and run the cVAE training experiment.
+PROJECT_NAME="exhale-prediction-cvae-baseline"
+MODEL_SAVE_DIR="../model_runs/cvae_run_1"
+DATA_DIR="/mnt/hot/public/Akul/exhale_pred_data"
 
-PROJECT_NAME="exhale-prediction-cvae"
-MODEL_SAVE_DIR="./saved_models_cvae"
-DATA_DIR="/hot/Akul/exhale_pred_data"
-
-EPOCHS=150
+EPOCHS=100
 BATCH_SIZE=4
 LEARNING_RATE=1e-4
 LATENT_DIM=256
-NUM_WORKERS=8
+CONDITION_SIZE=128
+NUM_WORKERS=4
 
-python train_cvae_wandb.py \
+# --- Hyperparameters to Tune ---
+# Beta for KL Divergence (1.0 is standard VAE)
+BETA=1.0
+# Reconstruction loss ('mse' or 'l1')
+LOSS_FN="l1"
+
+python train_cvae.py \
     --project_name "$PROJECT_NAME" \
     --model_save_dir "$MODEL_SAVE_DIR" \
     --data_dir "$DATA_DIR" \
@@ -19,4 +24,7 @@ python train_cvae_wandb.py \
     --batch_size "$BATCH_SIZE" \
     --learning_rate "$LEARNING_RATE" \
     --latent_dim "$LATENT_DIM" \
-    --num_workers "$NUM_WORKERS"
+    --condition_size "$CONDITION_SIZE" \
+    --num_workers "$NUM_WORKERS" \
+    --beta "$BETA" \
+    --loss_fn "$LOSS_FN"
