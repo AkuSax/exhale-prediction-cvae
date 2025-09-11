@@ -43,7 +43,6 @@ class ConditionalVAE(nn.Module):
         self.condition_size = condition_size
 
         # --- Encoder ---
-        # Input channels = 2 (exhale scan + inhale scan)
         self.encoder = nn.Sequential(
             nn.Conv3d(2, 32, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm3d(32),
@@ -57,13 +56,16 @@ class ConditionalVAE(nn.Module):
             nn.Conv3d(128, 256, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm3d(256),
             nn.LeakyReLU(0.2),
+            nn.Conv3d(256, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm3d(256),
+            nn.LeakyReLU(0.2),
         )
 
         # --- Latent Space Layers ---
         self.fc_mu = nn.Linear(4 * 4 * 4 * 256, latent_dim)
         self.fc_var = nn.Linear(4 * 4 * 4 * 256, latent_dim)
 
-        # --- NEW: Conditioning Network ---
+        # --- Conditioning Network ---
         self.condition_encoder = nn.Sequential(
             nn.Conv3d(1, 16, kernel_size=4, stride=2, padding=1),
             nn.LeakyReLU(0.2),
@@ -74,22 +76,35 @@ class ConditionalVAE(nn.Module):
             nn.Linear(32, self.condition_size)
         )
 
-        # --- Modified Decoder Input ---
+        # --- Decoder Input ---
         self.decoder_input = nn.Linear(latent_dim + self.condition_size, 4 * 4 * 4 * 256)
 
         # --- Decoder ---
         self.decoder = nn.Sequential(
+            # Input: (N, 256, 4, 4, 4)
             nn.ConvTranspose3d(256, 128, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm3d(128),
             nn.ReLU(),
+            # -> (N, 128, 8, 8, 8)
             nn.ConvTranspose3d(128, 64, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm3d(64),
             nn.ReLU(),
+            # -> (N, 64, 16, 16, 16)
             nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm3d(32),
             nn.ReLU(),
-            nn.ConvTranspose3d(32, 1, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid() # Sigmoid for [0, 1] output range
+            # -> (N, 32, 32, 32, 32)
+            
+            # --- FIX: ADDED THIS BLOCK TO MAKE DECODER SYMMETRICAL ---
+            nn.ConvTranspose3d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm3d(16),
+            nn.ReLU(),
+            # -> (N, 16, 64, 64, 64)
+            
+            # Final layer to get to 128x128x128 and 1 channel
+            nn.ConvTranspose3d(16, 1, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid()
+            # -> (N, 1, 128, 128, 128)
         )
 
     def encode(self, x, y):
@@ -137,7 +152,6 @@ def parse_args():
     parser.add_argument('--latent_dim', type=int, default=256)
     parser.add_argument('--condition_size', type=int, default=128, help="Size of processed condition vector.")
     parser.add_argument('--num_workers', type=int, default=4)
-    # New arguments
     parser.add_argument('--beta', type=float, default=1.0, help="Weight for the KL divergence term (β-VAE).")
     parser.add_argument('--loss_fn', type=str, default='mse', choices=['mse', 'l1'], help="Reconstruction loss.")
     return parser.parse_args()
