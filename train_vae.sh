@@ -1,6 +1,6 @@
 #!/bin/bash
 PROJECT_NAME="exhale-prediction-vae"
-MODEL_SAVE_DIR="./model_runs/vae_run_7"
+MODEL_SAVE_DIR="/model_runs/vae_run_7"
 DATA_DIR="/hot/Akul/exhale_pred_data"
 
 EPOCHS=400

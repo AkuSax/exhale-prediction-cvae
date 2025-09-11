@@ -1,6 +1,6 @@
 #!/bin/bash
 PROJECT_NAME="exhale-prediction-voxelmorph"
-MODEL_SAVE_DIR="../model_runs/voxelmorph_run_1"
+MODEL_SAVE_DIR="model_runs/voxelmorph_run_1"
 DATA_DIR="/mnt/hot/public/Akul/exhale_pred_data"
 
 EPOCHS=200

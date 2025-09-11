@@ -1,22 +1,20 @@
 #!/bin/bash
 PROJECT_NAME="exhale-prediction-cvae-baseline"
-MODEL_SAVE_DIR="../model_runs/cvae_run_1"
+MODEL_SAVE_DIR="./model_runs/cvae_run_1"
 DATA_DIR="/mnt/hot/public/Akul/exhale_pred_data"
 
 EPOCHS=100
-BATCH_SIZE=4
+BATCH_SIZE=8
 LEARNING_RATE=1e-4
 LATENT_DIM=256
 CONDITION_SIZE=128
-NUM_WORKERS=4
+NUM_WORKERS=8
 
-# --- Hyperparameters to Tune ---
-# Beta for KL Divergence (1.0 is standard VAE)
+# KLD loss hyperparameters
 BETA=1.0
-# Reconstruction loss ('mse' or 'l1')
 LOSS_FN="l1"
 
-python train_cvae.py \
+torchrun --standalone --nproc_per_node=2 train_cvae.py \
     --project_name "$PROJECT_NAME" \
     --model_save_dir "$MODEL_SAVE_DIR" \
     --data_dir "$DATA_DIR" \
