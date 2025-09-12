@@ -1,21 +1,22 @@
 #!/bin/bash
-PROJECT_NAME="exhale-prediction-cvae-baseline"
-MODEL_SAVE_DIR="./model_runs/cvae_run_1"
+PROJECT_NAME="exhale-prediction-cvae-kl-annealing"
+MODEL_SAVE_DIR="./model_runs/cvae_run_1" # New run directory
 DATA_DIR="/mnt/hot/public/Akul/exhale_pred_data"
 
 EPOCHS=100
 BATCH_SIZE=8
-LEARNING_RATE=1e-4
+LEARNING_RATE=5e-5 # Lowered for more stable start
 LATENT_DIM=256
 CONDITION_SIZE=128
 NUM_WORKERS=8
 
 # --- New Arguments ---
-VALIDATE_EVERY=5  # Run validation every 5 epochs
-LOG_IMAGES_EVERY=10 # Log image samples every 10 epochs
+VALIDATE_EVERY=5  
+LOG_IMAGES_EVERY=10 
+KL_ANNEAL_EPOCHS=40 # Increased for more gradual annealing
 
 # --- Hyperparameters ---
-BETA=1.0
+BETA=0.001
 LOSS_FN="l1"
 
 torchrun --standalone --nproc_per_node=2 train_cvae.py \
@@ -31,4 +32,5 @@ torchrun --standalone --nproc_per_node=2 train_cvae.py \
     --beta "$BETA" \
     --loss_fn "$LOSS_FN" \
     --validate_every "$VALIDATE_EVERY" \
-    --log_images_every "$LOG_IMAGES_EVERY"
+    --log_images_every "$LOG_IMAGES_EVERY" \
+    --kl_anneal_epochs "$KL_ANNEAL_EPOCHS"
