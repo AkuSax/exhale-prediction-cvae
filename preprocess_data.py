@@ -8,33 +8,23 @@ from scipy.ndimage import zoom
 from tqdm import tqdm
 
 # --- Configuration ---
-# Adjust these paths to match your system
 RAW_DATA_ROOT = Path("/mnt/hot/public/COPDGene-1")
 PROCESSED_DATA_DIR = Path("/mnt/hot/public/Akul/exhale_pred_data")
-
-# Target shape for all scans
+# --- REVERTED: Target shape for all scans ---
 TARGET_SHAPE = (128, 128, 128)
 
-# Hounsfield Unit (HU) windowing parameters for lung tissue
-# As recommended in the research document [cite: 519]
-LUNG_WINDOW_LEVEL = -600
-LUNG_WINDOW_WIDTH = 1500
-MIN_BOUND = LUNG_WINDOW_LEVEL - (LUNG_WINDOW_WIDTH / 2)
-MAX_BOUND = LUNG_WINDOW_LEVEL + (LUNG_WINDOW_WIDTH / 2)
-
-def normalize_scan_hu(scan_data: np.ndarray) -> np.ndarray:
+def normalize_scan_percentile(scan_data: np.ndarray) -> np.ndarray:
     """
-    Robustly normalizes a CT scan using Hounsfield Unit windowing.
-
-    1. Clips the intensity values to a specified HU range for lungs.
-    2. Scales the result to a [0, 1] range.
+    Robustly normalizes a CT scan using percentile clipping.
     """
-    # Clip the scan to the lung window
-    scan_data = np.clip(scan_data, MIN_BOUND, MAX_BOUND)
+    min_bound = np.percentile(scan_data, 1)
+    max_bound = np.percentile(scan_data, 99)
+    
+    if max_bound == min_bound:
+        return np.zeros(scan_data.shape, dtype=np.float32)
 
-    # Scale to [0, 1]
-    scan_data = (scan_data - MIN_BOUND) / (MAX_BOUND - MIN_BOUND)
-
+    scan_data = np.clip(scan_data, min_bound, max_bound)
+    scan_data = (scan_data - min_bound) / (max_bound - min_bound)
     return scan_data.astype(np.float32)
 
 def process_patient_pair(patient_id: str):
@@ -52,28 +42,18 @@ def process_patient_pair(patient_id: str):
         # --- Process Inhale Scan ---
         inhale_nii = nib.load(inhale_path)
         inhale_data = inhale_nii.get_fdata()
-
-        # Resize the scan
-        zoom_factors = [t / s for t, s in zip(TARGET_SHAPE, inhale_data.shape)]
-        inhale_resized = zoom(inhale_data, zoom_factors, order=1) # Linear interpolation
-
-        # Normalize the resized scan
-        inhale_normalized = normalize_scan_hu(inhale_resized)
-
+        zoom_factors_inhale = [t / s for t, s in zip(TARGET_SHAPE, inhale_data.shape)]
+        inhale_resized = zoom(inhale_data, zoom_factors_inhale, order=1)
+        inhale_normalized = normalize_scan_percentile(inhale_resized)
         np.save(PROCESSED_DATA_DIR / "inhale" / f"{patient_id}.npy", inhale_normalized)
 
         # --- Process Exhale Scan ---
         exhale_nii = nib.load(exhale_path)
         exhale_data = exhale_nii.get_fdata()
-
-        # Resize the scan
-        zoom_factors = [t / s for t, s in zip(TARGET_SHAPE, exhale_data.shape)]
-        exhale_resized = zoom(exhale_data, zoom_factors, order=1)
-
-        # Normalize the resized scan
-        exhale_normalized = normalize_scan_hu(exhale_resized)
-
-        np.save(PROCESSED_DATA_DIR / "exhale" / f"{patient_id}.npy", exhale_resized)
+        zoom_factors_exhale = [t / s for t, s in zip(TARGET_SHAPE, exhale_data.shape)]
+        exhale_resized = zoom(exhale_data, zoom_factors_exhale, order=1)
+        exhale_normalized = normalize_scan_percentile(exhale_resized)
+        np.save(PROCESSED_DATA_DIR / "exhale" / f"{patient_id}.npy", exhale_normalized)
 
         return None  # Success
     except Exception as e:
@@ -83,11 +63,9 @@ def main():
     """
     Main function to find all patient IDs and process their scans in parallel.
     """
-    # Create output directories
     (PROCESSED_DATA_DIR / "inhale").mkdir(parents=True, exist_ok=True)
     (PROCESSED_DATA_DIR / "exhale").mkdir(parents=True, exist_ok=True)
 
-    # Find unique patient IDs from filenames
     all_files = list(RAW_DATA_ROOT.glob("*_INSP_image.nii.gz"))
     patient_ids = sorted([f.name.split('_')[0] for f in all_files])
 
@@ -97,13 +75,10 @@ def main():
 
     print(f"Found {len(patient_ids)} patient scan pairs. Starting preprocessing...")
 
-    # Use a multiprocessing pool to parallelize the work
-    # Leave a couple of CPU cores free for system stability
     num_processes = max(1, multiprocessing.cpu_count() - 2)
     with multiprocessing.Pool(processes=num_processes) as pool:
         results = list(tqdm(pool.imap_unordered(process_patient_pair, patient_ids), total=len(patient_ids)))
 
-    # Print any errors that occurred during processing
     error_count = 0
     for res in results:
         if res is not None:

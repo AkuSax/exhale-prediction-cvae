@@ -1,24 +1,23 @@
 #!/bin/bash
-PROJECT_NAME="exhale-prediction-cvae"
-MODEL_SAVE_DIR="./model_runs/cvae_run_2"
+PROJECT_NAME="exhale-prediction-cvae-debug"
+MODEL_SAVE_DIR="./model_runs/cvae_run_debug"
 DATA_DIR="/mnt/hot/public/Akul/exhale_pred_data"
 
-EPOCHS=100
-BATCH_SIZE=8
-LEARNING_RATE=2e-5
+EPOCHS=10
+BATCH_SIZE=4
+LEARNING_RATE=5e-5
 LATENT_DIM=256
 CONDITION_SIZE=128
-NUM_WORKERS=8
-
-# --- Arguments ---
-VALIDATE_EVERY=5
-LOG_IMAGES_EVERY=10
-KL_ANNEAL_EPOCHS=40
+NUM_WORKERS=4
+NUM_SAMPLES=100
 
 # --- Hyperparameters ---
-BETA=0.1
+BETA=1.0
 LOSS_FN="l1"
-FREE_BITS=0.05
+VALIDATE_EVERY=1
+LOG_IMAGES_EVERY=1
+KL_ANNEAL_EPOCHS=5 # Anneal beta over the first 5 epochs
+FREE_BITS=0.05     # Add a small free bits threshold
 
 torchrun --standalone --nproc_per_node=2 train_cvae.py \
     --project_name "$PROJECT_NAME" \
@@ -34,5 +33,6 @@ torchrun --standalone --nproc_per_node=2 train_cvae.py \
     --loss_fn "$LOSS_FN" \
     --validate_every "$VALIDATE_EVERY" \
     --log_images_every "$LOG_IMAGES_EVERY" \
+    --num_samples "$NUM_SAMPLES" \
     --kl_anneal_epochs "$KL_ANNEAL_EPOCHS" \
     --free_bits "$FREE_BITS"

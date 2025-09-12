@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-# --- FIX: Use torch.amp instead of torch.cuda.amp ---
-from torch.amp import autocast, GradScaler
+from torchvision.utils import save_image
+from torch.amp import autocast, GradScaler 
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -30,10 +30,13 @@ def cleanup_ddp():
 
 # --- PyTorch Dataset ---
 class PairedLungDataset(Dataset):
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, num_samples: int = None):
         self.inhale_dir = data_dir / "inhale"
         self.exhale_dir = data_dir / "exhale"
         self.patient_ids = sorted([f.stem for f in self.inhale_dir.glob("*.npy")])
+        
+        if num_samples:
+            self.patient_ids = self.patient_ids[:num_samples]
 
     def __len__(self):
         return len(self.patient_ids)
@@ -51,7 +54,7 @@ class PairedLungDataset(Dataset):
         
         return torch.from_numpy(exhale_scan), torch.from_numpy(inhale_scan)
 
-# --- CVAE Model ---
+# --- CVAE Model (128x128x128 baseline) ---
 class ConditionalVAE(nn.Module):
     def __init__(self, latent_dim=256, condition_size=128):
         super(ConditionalVAE, self).__init__()
@@ -104,10 +107,11 @@ class ConditionalVAE(nn.Module):
         recon_x = self.decode(z, y)
         return recon_x, mu, log_var
 
-# --- Loss Function ---
-def loss_function(recon_x, x, mu, log_var, beta, recon_loss_fn):
+# --- Loss Function with Free Bits ---
+def loss_function(recon_x, x, mu, log_var, beta, free_bits, recon_loss_fn):
     reconstruction_loss = recon_loss_fn(recon_x, x, reduction='mean')
-    kld_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+    kld_per_dim = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+    kld_loss = torch.mean(torch.max(kld_per_dim, torch.tensor(free_bits).to(kld_per_dim.device)))
     total_loss = reconstruction_loss + beta * kld_loss
     return reconstruction_loss, kld_loss, total_loss
 
@@ -116,18 +120,20 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train a 3D Conditional VAE.")
     parser.add_argument('--project_name', type=str, required=True)
     parser.add_argument('--model_save_dir', type=str, required=True)
-    parser.add_argument('--data_dir', type=str, default="../data/processed")
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--data_dir', type=str, default="./processed_data")
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--learning_rate', type=float, default=5e-5)
     parser.add_argument('--latent_dim', type=int, default=256)
     parser.add_argument('--condition_size', type=int, default=128)
-    parser.add_argument('--num_workers', type=int, default=8)
-    parser.add_argument('--beta', type=float, default=0.001)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--beta', type=float, default=1.0)
     parser.add_argument('--loss_fn', type=str, default='l1', choices=['mse', 'l1'])
-    parser.add_argument('--validate_every', type=int, default=5)
-    parser.add_argument('--log_images_every', type=int, default=10)
-    parser.add_argument('--kl_anneal_epochs', type=int, default=40, help="Epochs for KL annealing.")
+    parser.add_argument('--validate_every', type=int, default=1)
+    parser.add_argument('--log_images_every', type=int, default=1)
+    parser.add_argument('--kl_anneal_epochs', type=int, default=5)
+    parser.add_argument('--num_samples', type=int, default=None)
+    parser.add_argument('--free_bits', type=float, default=0.0)
     return parser.parse_args()
 
 # --- Main Training Loop ---
@@ -139,24 +145,23 @@ def main(args):
         wandb.init(project=args.project_name, config=vars(args))
         Path(args.model_save_dir).mkdir(parents=True, exist_ok=True)
     
-    # --- Data ---
-    full_dataset = PairedLungDataset(Path(args.data_dir))
+    full_dataset = PairedLungDataset(Path(args.data_dir), num_samples=args.num_samples)
+    
     train_sampler = DistributedSampler(full_dataset, drop_last=True)
     train_loader = DataLoader(full_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.num_workers, pin_memory=True)
     
     val_sampler = DistributedSampler(full_dataset, shuffle=False, drop_last=True)
     val_loader = DataLoader(full_dataset, batch_size=args.batch_size, sampler=val_sampler, num_workers=args.num_workers, pin_memory=True)
     
-    # --- Model, Optimizer, Loss ---
     model = ConditionalVAE(latent_dim=args.latent_dim, condition_size=args.condition_size).to(local_rank)
     model = DDP(model, device_ids=[local_rank])
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=10)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=5)
     recon_loss_fn = F.mse_loss if args.loss_fn == 'mse' else F.l1_loss
-    scaler = GradScaler(device_type='cuda')
+    
+    scaler = GradScaler()
     best_val_loss = float('inf')
 
-    # --- Training ---
     global_step = 0
     for epoch in range(args.epochs):
         model.train()
@@ -167,26 +172,27 @@ def main(args):
         for i, (real_exhale, real_inhale) in enumerate(train_iterator):
             real_exhale, real_inhale = real_exhale.to(local_rank), real_inhale.to(local_rank)
             
+            global_step = epoch * len(train_loader) + i
             if args.kl_anneal_epochs > 0:
-                current_beta = args.beta * min(1.0, epoch / args.kl_anneal_epochs)
+                anneal_total_steps = args.kl_anneal_epochs * len(train_loader)
+                current_beta = args.beta * min(1.0, global_step / anneal_total_steps)
             else:
                 current_beta = args.beta
 
             optimizer.zero_grad()
-            with autocast(device_type='cuda', dtype=torch.float16):
+            with autocast(device_type='cuda'):
                 recon_exhale, mu, log_var = model(real_exhale, real_inhale)
-                recon_loss, kld_loss, loss = loss_function(recon_exhale, real_exhale, mu, log_var, current_beta, recon_loss_fn)
+                recon_loss, kld_loss, loss = loss_function(recon_exhale, real_exhale, mu, log_var, current_beta, args.free_bits, recon_loss_fn)
             
             scaler.scale(loss).backward()
             
             if local_rank == 0:
                 scaler.unscale_(optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                global_step = epoch * len(train_loader) + i
                 wandb.log({
-                    "train/step_loss": loss.item() / args.batch_size,
-                    "train/step_recon_loss": recon_loss.item() / args.batch_size,
-                    "train/step_kld_loss": kld_loss.item() / args.batch_size,
+                    "train/step_loss": loss.item(),
+                    "train/step_recon_loss": recon_loss.item(),
+                    "train/step_kld_loss": kld_loss.item(),
                     "train/grad_norm": grad_norm.item(),
                     "hyper/beta": current_beta,
                     "hyper/learning_rate": optimizer.param_groups[0]['lr'],
@@ -199,7 +205,6 @@ def main(args):
             scaler.step(optimizer)
             scaler.update()
 
-        # --- Validation ---
         if (epoch + 1) % args.validate_every == 0:
             model.eval()
             total_val_loss = 0
@@ -207,43 +212,62 @@ def main(args):
                 val_iterator = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Val]", disable=(local_rank!=0))
                 for real_exhale, real_inhale in val_iterator:
                     real_exhale, real_inhale = real_exhale.to(local_rank), real_inhale.to(local_rank)
-                    with autocast(device_type='cuda', dtype=torch.float16):
+                    with autocast(device_type='cuda'):
                         recon_exhale, mu, log_var = model(real_exhale, real_inhale)
-                        _, _, loss = loss_function(recon_exhale, real_exhale, mu, log_var, args.beta, recon_loss_fn)
+                        _, _, loss = loss_function(recon_exhale, real_exhale, mu, log_var, args.beta, args.free_bits, recon_loss_fn)
                     total_val_loss += loss.item()
-            
             if local_rank == 0:
                 avg_val_loss = total_val_loss / len(val_loader.dataset)
                 wandb.log({"val/epoch_loss": avg_val_loss, "epoch": epoch + 1}, step=global_step)
-                
                 scheduler.step(avg_val_loss)
-
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     model_path = Path(args.model_save_dir) / "best_cvae_model.pth"
                     torch.save(model.module.state_dict(), model_path)
 
-        # --- Image Logging ---
         if (epoch + 1) % args.log_images_every == 0 and local_rank == 0:
             model.eval()
             with torch.no_grad():
                 fixed_exhale, fixed_inhale = next(iter(val_loader))
                 fixed_exhale, fixed_inhale = fixed_exhale.to(local_rank), fixed_inhale.to(local_rank)
-                with autocast(device_type='cuda', dtype=torch.float16):
+                with autocast(device_type='cuda'):
                     recon_exhale, _, _ = model(fixed_exhale, fixed_inhale)
-
-                slice_idx = fixed_exhale.shape[2] // 2
-                real_slice = fixed_exhale[0, 0, slice_idx].cpu()
-                recon_slice = recon_exhale[0, 0, slice_idx].cpu()
-                condition_slice = fixed_inhale[0, 0, slice_idx].cpu()
                 
-                images = torch.stack([condition_slice, real_slice, recon_slice])
-                grid = make_grid(images, nrow=3, normalize=True, pad_value=1)
-                
-                wandb.log({"val_images": wandb.Image(grid, caption=f"Epoch {epoch+1} | Inhale (Cond), Real Exhale, Recon Exhale")}, step=global_step)
+                d_idx, h_idx, w_idx = [s // 2 for s in fixed_exhale.shape[2:]]
 
-    if local_rank == 0:
-        wandb.finish()
+                sag_cond = fixed_inhale[0, :, d_idx, :, :].cpu().unsqueeze(0)
+                sag_real = fixed_exhale[0, :, d_idx, :, :].cpu().unsqueeze(0)
+                sag_recon = recon_exhale[0, :, d_idx, :, :].cpu().unsqueeze(0)
+                
+                cor_cond = fixed_inhale[0, :, :, h_idx, :].cpu().unsqueeze(0)
+                cor_real = fixed_exhale[0, :, :, h_idx, :].cpu().unsqueeze(0)
+                cor_recon = recon_exhale[0, :, :, h_idx, :].cpu().unsqueeze(0)
+                
+                ax_cond = fixed_inhale[0, :, :, :, w_idx].cpu().unsqueeze(0)
+                ax_real = fixed_exhale[0, :, :, :, w_idx].cpu().unsqueeze(0)
+                ax_recon = recon_exhale[0, :, :, :, w_idx].cpu().unsqueeze(0)
+
+                images = [
+                    sag_cond, cor_cond, ax_cond,
+                    sag_real, cor_real, ax_real,
+                    sag_recon, cor_recon, ax_recon
+                ]
+                
+                # Concatenate into a single tensor
+                grid_tensor = torch.cat(images)
+
+                # Create the 3x3 grid
+                grid = make_grid(grid_tensor, nrow=3, normalize=True, pad_value=1)
+                
+                save_path = Path(args.model_save_dir) / f"epoch_{epoch+1}_comparison_grid.png"
+                save_image(grid, save_path)
+                wandb.log({
+                    "val_images/comparison_grid": wandb.Image(
+                        grid, 
+                        caption=f"Epoch {epoch+1} | Rows: Inhale, Real, Recon | Cols: Sag, Cor, Axial"
+                    )
+                }, step=global_step)
+
     cleanup_ddp()
 
 if __name__ == "__main__":
