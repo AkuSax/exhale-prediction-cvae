@@ -19,8 +19,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.utils import make_grid
 
-# (DDP Setup and PairedLungDataset classes remain the same)
-# --- DDP Setup ---
 def setup_ddp():
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
@@ -28,7 +26,6 @@ def setup_ddp():
 def cleanup_ddp():
     dist.destroy_process_group()
 
-# --- PyTorch Dataset ---
 class PairedLungDataset(Dataset):
     def __init__(self, data_dir: Path, num_samples: int = None):
         self.inhale_dir = data_dir / "inhale"
@@ -54,7 +51,28 @@ class PairedLungDataset(Dataset):
         
         return torch.from_numpy(exhale_scan), torch.from_numpy(inhale_scan)
 
-# --- CVAE Model (128x128x128 baseline) ---
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm3d(out_channels)
+        self.relu = nn.LeakyReLU(0.2, inplace=True)
+        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm3d(out_channels)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv3d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm3d(out_channels)
+            )
+            
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += identity
+        return self.relu(out)
+
 class ConditionalVAE(nn.Module):
     def __init__(self, latent_dim=256, condition_size=128):
         super(ConditionalVAE, self).__init__()
@@ -62,10 +80,10 @@ class ConditionalVAE(nn.Module):
         self.condition_size = condition_size
 
         self.encoder = nn.Sequential(
-            nn.Conv3d(2, 32, kernel_size=4, stride=2, padding=1), nn.BatchNorm3d(32), nn.LeakyReLU(0.2),
-            nn.Conv3d(32, 64, kernel_size=4, stride=2, padding=1), nn.BatchNorm3d(64), nn.LeakyReLU(0.2),
-            nn.Conv3d(64, 128, kernel_size=4, stride=2, padding=1), nn.BatchNorm3d(128), nn.LeakyReLU(0.2),
-            nn.Conv3d(128, 256, kernel_size=4, stride=2, padding=1), nn.BatchNorm3d(256), nn.LeakyReLU(0.2),
+            ResidualBlock(2, 32, stride=2),
+            ResidualBlock(32, 64, stride=2),
+            ResidualBlock(64, 128, stride=2),
+            ResidualBlock(128, 256, stride=2),
         )
         self.fc_mu = nn.Linear(8 * 8 * 8 * 256, latent_dim)
         self.fc_var = nn.Linear(8 * 8 * 8 * 256, latent_dim)
@@ -76,6 +94,7 @@ class ConditionalVAE(nn.Module):
             nn.AdaptiveAvgPool3d((1, 1, 1)), nn.Flatten(), nn.Linear(32, self.condition_size)
         )
         self.decoder_input = nn.Linear(latent_dim + self.condition_size, 8 * 8 * 8 * 256)
+        
         self.decoder = nn.Sequential(
             nn.ConvTranspose3d(256, 128, kernel_size=4, stride=2, padding=1), nn.BatchNorm3d(128), nn.ReLU(),
             nn.ConvTranspose3d(128, 64, kernel_size=4, stride=2, padding=1), nn.BatchNorm3d(64), nn.ReLU(),
@@ -107,7 +126,6 @@ class ConditionalVAE(nn.Module):
         recon_x = self.decode(z, y)
         return recon_x, mu, log_var
 
-# --- Loss Function with Free Bits ---
 def loss_function(recon_x, x, mu, log_var, beta, free_bits, recon_loss_fn):
     reconstruction_loss = recon_loss_fn(recon_x, x, reduction='mean')
     kld_per_dim = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
@@ -115,7 +133,6 @@ def loss_function(recon_x, x, mu, log_var, beta, free_bits, recon_loss_fn):
     total_loss = reconstruction_loss + beta * kld_loss
     return reconstruction_loss, kld_loss, total_loss
 
-# --- Argument Parser ---
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a 3D Conditional VAE.")
     parser.add_argument('--project_name', type=str, required=True)
@@ -136,7 +153,6 @@ def parse_args():
     parser.add_argument('--free_bits', type=float, default=0.0)
     return parser.parse_args()
 
-# --- Main Training Loop ---
 def main(args):
     setup_ddp()
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -253,18 +269,14 @@ def main(args):
                     sag_recon, cor_recon, ax_recon
                 ]
                 
-                # Concatenate into a single tensor
                 grid_tensor = torch.cat(images)
-
-                # Create the 3x3 grid
                 grid = make_grid(grid_tensor, nrow=3, normalize=True, pad_value=1)
                 
                 save_path = Path(args.model_save_dir) / f"epoch_{epoch+1}_comparison_grid.png"
                 save_image(grid, save_path)
                 wandb.log({
                     "val_images/comparison_grid": wandb.Image(
-                        grid, 
-                        caption=f"Epoch {epoch+1} | Rows: Inhale, Real, Recon | Cols: Sag, Cor, Axial"
+                        grid, caption=f"Epoch {epoch+1} | Rows: Inhale, Real, Recon | Cols: Sag, Cor, Axial"
                     )
                 }, step=global_step)
 
