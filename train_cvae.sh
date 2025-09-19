@@ -1,25 +1,27 @@
 #!/bin/bash
 PROJECT_NAME="exhale-prediction-cvae"
-MODEL_SAVE_DIR="./model_runs/cvae_run_2"
+MODEL_SAVE_DIR="./model_runs/cvae_run_3"
 DATA_DIR="/mnt/hot/public/Akul/exhale_pred_data"
 
+# --- Training Parameters ---
 EPOCHS=100
-BATCH_SIZE=8
-LEARNING_RATE=2e-5
-LATENT_DIM=256
-CONDITION_SIZE=128
+BATCH_SIZE=32
+LEARNING_RATE=1e-4
 NUM_WORKERS=8
 
-# --- Arguments ---
-VALIDATE_EVERY=5
-LOG_IMAGES_EVERY=10
-KL_ANNEAL_EPOCHS=40
-
-# --- Hyperparameters ---
-BETA=0.1
+# --- Model Hyperparameters ---
+LATENT_DIM=256
+CONDITION_SIZE=128
+BETA=1.0
 LOSS_FN="l1"
-FREE_BITS=0.05
+KL_ANNEAL_EPOCHS=40 
+FREE_BITS=0.0
 
+# --- Logging ---
+VALIDATE_EVERY=5  
+LOG_IMAGES_EVERY=5
+
+# --- Run the training job with all data ---
 torchrun --standalone --nproc_per_node=2 train_cvae.py \
     --project_name "$PROJECT_NAME" \
     --model_save_dir "$MODEL_SAVE_DIR" \

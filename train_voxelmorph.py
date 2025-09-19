@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import wandb
 
-# (Assuming datasets.py contains the PairedLungDataset from your cVAE script)
 from datasets import PairedLungDataset 
 
 # --- VoxelMorph U-Net Architecture Components ---

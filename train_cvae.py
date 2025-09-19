@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torchvision.utils import save_image
-from torch.amp import autocast, GradScaler 
+from torch.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -32,6 +32,7 @@ class PairedLungDataset(Dataset):
         self.exhale_dir = data_dir / "exhale"
         self.patient_ids = sorted([f.stem for f in self.inhale_dir.glob("*.npy")])
         
+        # --- NEW: If num_samples is provided, slice the dataset ---
         if num_samples:
             self.patient_ids = self.patient_ids[:num_samples]
 
@@ -149,8 +150,9 @@ def parse_args():
     parser.add_argument('--validate_every', type=int, default=1)
     parser.add_argument('--log_images_every', type=int, default=1)
     parser.add_argument('--kl_anneal_epochs', type=int, default=5)
-    parser.add_argument('--num_samples', type=int, default=None)
     parser.add_argument('--free_bits', type=float, default=0.0)
+    # --- NEW: Argument to run on a subset of the data ---
+    parser.add_argument('--num_samples', type=int, default=None, help="Number of samples to use for a quick debug run.")
     return parser.parse_args()
 
 def main(args):
@@ -212,10 +214,6 @@ def main(args):
                     "train/grad_norm": grad_norm.item(),
                     "hyper/beta": current_beta,
                     "hyper/learning_rate": optimizer.param_groups[0]['lr'],
-                    "latent/mu_mean": mu.mean().item(),
-                    "latent/mu_std": mu.std().item(),
-                    "latent/log_var_mean": log_var.mean().item(),
-                    "latent/log_var_std": log_var.std().item(),
                 }, step=global_step)
             
             scaler.step(optimizer)
@@ -263,21 +261,14 @@ def main(args):
                 ax_real = fixed_exhale[0, :, :, :, w_idx].cpu().unsqueeze(0)
                 ax_recon = recon_exhale[0, :, :, :, w_idx].cpu().unsqueeze(0)
 
-                images = [
-                    sag_cond, cor_cond, ax_cond,
-                    sag_real, cor_real, ax_real,
-                    sag_recon, cor_recon, ax_recon
-                ]
-                
+                images = [sag_cond, cor_cond, ax_cond, sag_real, cor_real, ax_real, sag_recon, cor_recon, ax_recon]
                 grid_tensor = torch.cat(images)
                 grid = make_grid(grid_tensor, nrow=3, normalize=True, pad_value=1)
                 
                 save_path = Path(args.model_save_dir) / f"epoch_{epoch+1}_comparison_grid.png"
                 save_image(grid, save_path)
                 wandb.log({
-                    "val_images/comparison_grid": wandb.Image(
-                        grid, caption=f"Epoch {epoch+1} | Rows: Inhale, Real, Recon | Cols: Sag, Cor, Axial"
-                    )
+                    "val_images/comparison_grid": wandb.Image(grid, caption=f"Epoch {epoch+1} | Rows: Inhale, Real, Recon | Cols: Sag, Cor, Axial")
                 }, step=global_step)
 
     cleanup_ddp()
