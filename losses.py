@@ -1,5 +1,3 @@
-# losses.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +11,10 @@ class NCCLoss(nn.Module):
         self.eps = eps
 
     def forward(self, I, J, mask=None):
+        # Ensure tensors are 5D
+        if I.dim() == 4: I = I.unsqueeze(0)
+        if J.dim() == 4: J = J.unsqueeze(0)
+        
         I_mean = torch.mean(I, dim=[1, 2, 3, 4], keepdim=True)
         J_mean = torch.mean(J, dim=[1, 2, 3, 4], keepdim=True)
 
@@ -23,6 +25,7 @@ class NCCLoss(nn.Module):
         J_minus_mean = J - J_mean
 
         if mask is not None:
+            if mask.dim() == 4: mask = mask.unsqueeze(0)
             I_minus_mean = I_minus_mean * mask
             J_minus_mean = J_minus_mean * mask
 
@@ -40,6 +43,12 @@ class GradientSmoothingLoss(nn.Module):
         super().__init__()
 
     def forward(self, vf):
+        # --- THIS IS THE FIX ---
+        # Ensure the input is a 5D tensor before indexing
+        if vf.dim() == 4:
+            # Add a batch dimension if it's missing
+            vf = vf.unsqueeze(0)
+            
         dy = torch.abs(vf[:, :, 1:, :, :] - vf[:, :, :-1, :, :])
         dx = torch.abs(vf[:, :, :, 1:, :] - vf[:, :, :, :-1, :])
         dz = torch.abs(vf[:, :, :, :, 1:] - vf[:, :, :, :, :-1])
