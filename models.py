@@ -1,7 +1,10 @@
+# models.py (Final Corrected Version)
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from monai.networks.nets import SwinUNETR
+import os
 
 class ScalingAndSquaring(nn.Module):
     """
@@ -11,10 +14,10 @@ class ScalingAndSquaring(nn.Module):
     def __init__(self, size, scaling_steps=7):
         super().__init__()
         self.scaling_steps = scaling_steps
+        # Register a single, non-batched grid as a buffer.
         vectors = [torch.arange(0, s) for s in size]
         grids = torch.meshgrid(vectors, indexing='ij')
         grid = torch.stack(grids)
-        grid = torch.unsqueeze(grid, 0)
         grid = grid.type(torch.FloatTensor)
         self.register_buffer('grid', grid, persistent=False)
 
@@ -27,16 +30,14 @@ class ScalingAndSquaring(nn.Module):
         return v
 
     def compose(self, v1, v2):
-        # Explicitly repeat the grid to match the batch size of the flow field.
-        sampling_grid = self.grid.repeat(v1.shape[0], 1, 1, 1, 1) + v1
-
-        # Normalize the sampling grid to be in the required [-1, 1] range
+        # Create grid with batch dimension matching v1
+        grid = self.grid.unsqueeze(0).repeat(v1.shape[0], 1, 1, 1, 1).to(v1.device)
+        sampling_grid = grid + v1
         size = v1.shape[2:]
         for i, s in enumerate(size):
             sampling_grid[:, i, ...] = 2 * (sampling_grid[:, i, ...] / (s - 1) - 0.5)
         
         sampling_grid = sampling_grid.permute(0, 2, 3, 4, 1)
-
         v2_warped = F.grid_sample(
             v2, sampling_grid, mode='bilinear', padding_mode='border', align_corners=False
         )
@@ -69,28 +70,29 @@ class CycleTransMorph(nn.Module):
 
 class SpatialTransformer(nn.Module):
     """
-    N-D Spatial Transformer.
-    This version is robust to batch sizes for DDP training.
+    N-D Spatial Transformer, robust to DDP.
     """
     def __init__(self, size, mode='bilinear'):
         super().__init__()
         self.mode = mode
+        # Register a single, non-batched grid as a buffer.
         vectors = [torch.arange(0, s) for s in size]
         grids = torch.meshgrid(vectors, indexing='ij')
         grid = torch.stack(grids)
-        grid = torch.unsqueeze(grid, 0)
         grid = grid.type(torch.FloatTensor)
         self.register_buffer('grid', grid, persistent=False)
 
     def forward(self, src, flow):
-        # Explicitly repeat the grid to match the batch size of the flow.
-        new_locs = self.grid.repeat(flow.shape[0], 1, 1, 1, 1) + flow
-
+        # Create grid with batch dimension matching flow
+        grid = self.grid.unsqueeze(0).repeat(flow.shape[0], 1, 1, 1, 1).to(flow.device)
+        new_locs = grid + flow
         shape = flow.shape[2:]
+
         for i in range(len(shape)):
             new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
 
-        new_locs = new_locs.permute(0, 2, 3, 4, 1)
-        new_locs = new_locs[..., [2, 1, 0]]
-
+        if len(shape) == 3:
+            new_locs = new_locs.permute(0, 2, 3, 4, 1)
+            new_locs = new_locs[..., [2, 1, 0]]
+        
         return F.grid_sample(src, new_locs, align_corners=True, mode=self.mode)
