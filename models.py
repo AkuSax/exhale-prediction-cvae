@@ -1,4 +1,4 @@
-# models.py (Final Corrected Version)
+# models.py
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,6 @@ class ScalingAndSquaring(nn.Module):
     def __init__(self, size, scaling_steps=7):
         super().__init__()
         self.scaling_steps = scaling_steps
-        # Register a single, non-batched grid as a buffer.
         vectors = [torch.arange(0, s) for s in size]
         grids = torch.meshgrid(vectors, indexing='ij')
         grid = torch.stack(grids)
@@ -22,15 +21,12 @@ class ScalingAndSquaring(nn.Module):
         self.register_buffer('grid', grid, persistent=False)
 
     def forward(self, v):
-        if v.dim() == 4:
-            v = v.unsqueeze(0)
         v = v / (2**self.scaling_steps)
         for _ in range(self.scaling_steps):
             v = v + self.compose(v, v)
         return v
 
     def compose(self, v1, v2):
-        # Create grid with batch dimension matching v1
         grid = self.grid.unsqueeze(0).repeat(v1.shape[0], 1, 1, 1, 1).to(v1.device)
         sampling_grid = grid + v1
         size = v1.shape[2:]
@@ -39,7 +35,7 @@ class ScalingAndSquaring(nn.Module):
         
         sampling_grid = sampling_grid.permute(0, 2, 3, 4, 1)
         v2_warped = F.grid_sample(
-            v2, sampling_grid, mode='bilinear', padding_mode='border', align_corners=False
+            v2, sampling_grid, mode='bilinear', padding_mode='border', align_corners=True
         )
         return v2_warped
     
@@ -62,7 +58,13 @@ class CycleTransMorph(nn.Module):
 
     def forward(self, moving, fixed):
         x = torch.cat([moving, fixed], dim=1)
-        transformer_features = self.transformer_backbone(x)[0]
+        transformer_output = self.transformer_backbone(x)
+
+        if isinstance(transformer_output, (list, tuple)):
+            transformer_features = transformer_output[0]
+        else:
+            transformer_features = transformer_output
+
         svf = self.svf_head(transformer_features)
         dvf = self.diffeomorphic_layer(svf)
         warped_image = self.spatial_transformer(moving, dvf)
@@ -75,7 +77,6 @@ class SpatialTransformer(nn.Module):
     def __init__(self, size, mode='bilinear'):
         super().__init__()
         self.mode = mode
-        # Register a single, non-batched grid as a buffer.
         vectors = [torch.arange(0, s) for s in size]
         grids = torch.meshgrid(vectors, indexing='ij')
         grid = torch.stack(grids)
@@ -83,7 +84,6 @@ class SpatialTransformer(nn.Module):
         self.register_buffer('grid', grid, persistent=False)
 
     def forward(self, src, flow):
-        # Create grid with batch dimension matching flow
         grid = self.grid.unsqueeze(0).repeat(flow.shape[0], 1, 1, 1, 1).to(flow.device)
         new_locs = grid + flow
         shape = flow.shape[2:]

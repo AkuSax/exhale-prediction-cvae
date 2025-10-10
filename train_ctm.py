@@ -1,209 +1,162 @@
-# train_ctm.py (Corrected for DDP)
-
 import os
 import argparse
+import random
 import numpy as np
+from tqdm import tqdm
+
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
-import wandb
-
-# DDP Imports
-import torch.distributed as dist
+from torch.utils.data import Dataset, DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 
-
-# Assuming models.py and losses.py are in the same directory
-from models import CycleTransMorph, SpatialTransformer
+from models import CycleTransMorph
 from losses import NCCLoss, GradientSmoothingLoss, CycleConsistencyLoss
+from torch.cuda.amp import GradScaler, autocast
+import wandb
 
-# --- DDP Helper Functions ---
-def setup_ddp():
-    """Initializes the distributed process group."""
-    dist.init_process_group(backend="nccl")
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+def setup_ddp(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup_ddp():
-    """Destroys the distributed process group."""
     dist.destroy_process_group()
 
-
-# --- Updated Dataset Class for separate inhale/exhale masks ---
-class NumpyDataset(Dataset):
-    def __init__(self, inhale_paths, exhale_paths, inhale_mask_paths, exhale_mask_paths):
-        self.inhale_paths = inhale_paths
-        self.exhale_paths = exhale_paths
-        self.inhale_mask_paths = inhale_mask_paths
-        self.exhale_mask_paths = exhale_mask_paths
+class NpyDataset(Dataset):
+    def __init__(self, file_paths):
+        self.file_paths = file_paths
 
     def __len__(self):
-        # All lists are guaranteed to be the same length by the data loading logic
-        return len(self.inhale_paths)
+        return len(self.file_paths)
 
     def __getitem__(self, idx):
-        # Load the .npy arrays for images and both masks
-        inhale_img = np.load(self.inhale_paths[idx]).astype(np.float32)
-        exhale_img = np.load(self.exhale_paths[idx]).astype(np.float32)
-        inhale_mask = np.load(self.inhale_mask_paths[idx]).astype(np.float32)
-        exhale_mask = np.load(self.exhale_mask_paths[idx]).astype(np.float32)
+        base_file = self.file_paths[idx]
+        inhale = torch.from_numpy(np.load(base_file.replace('.npy', '_inhale.npy'))).float().unsqueeze(0)
+        exhale = torch.from_numpy(np.load(base_file.replace('.npy', '_exhale.npy'))).float().unsqueeze(0)
+        return inhale, exhale
 
-        # Add channel dimension
-        inhale_img = np.expand_dims(inhale_img, axis=0)
-        exhale_img = np.expand_dims(exhale_img, axis=0)
-        inhale_mask = np.expand_dims(inhale_mask, axis=0)
-        exhale_mask = np.expand_dims(exhale_mask, axis=0)
-
-        return (
-            torch.from_numpy(inhale_img),
-            torch.from_numpy(exhale_img),
-            torch.from_numpy(inhale_mask),
-            torch.from_numpy(exhale_mask),
-        )
-
-# --- Main Training Function ---
 def train(args):
-    # --- DDP Setup ---
-    setup_ddp()
-    local_rank = int(os.environ["LOCAL_RANK"])
-
-    # --- WandB Setup (only on rank 0) ---
-    if local_rank == 0:
-        if args.debug:
-            print("--- RUNNING IN DEBUG MODE (WandB disabled) ---")
-            wandb.init(mode="disabled")
-        else:
-            wandb.init(project="exhale_prediction_cycletransmorph", config=args)
-
-    # --- Robust Data Loading ---
-    if local_rank == 0:
-        print("--- Scanning for complete data quadruplets (inhale, exhale, inhale_mask, exhale_mask) ---")
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    setup_ddp(rank, world_size)
+    torch.cuda.set_device(rank)
     
-    inhale_dir = os.path.join(args.data_dir, 'inhale')
-    exhale_dir = os.path.join(args.data_dir, 'exhale')
-    inhale_masks_dir = os.path.join(args.data_dir, 'masks', 'inhale')
-    exhale_masks_dir = os.path.join(args.data_dir, 'masks', 'exhale')
+    if rank == 0:
+        if not args.debug:
+            wandb.init(project="exhale_pred", name=args.run_name)
+    
+    # --- Data Loading (NOW FAST!) ---
+    if rank == 0: print(f"--- Loading file list from: {args.file_list} ---")
+    with open(args.file_list, 'r') as f:
+        complete_files = [line.strip() for line in f.readlines()]
+    if rank == 0: print(f"--- Found {len(complete_files)} complete data quadruplets. ---")
+    
+    # --- Dataset Subsampling ---
+    if args.dataset_fraction < 1.0:
+        num_samples = int(len(complete_files) * args.dataset_fraction)
+        random.shuffle(complete_files)
+        complete_files = complete_files[:num_samples]
+        if rank == 0: print(f"--- Using a {args.dataset_fraction*100:.1f}% subset of data ({len(complete_files)} scans) ---")
 
-    train_inhale_paths, train_exhale_paths = [], []
-    train_inhale_mask_paths, train_exhale_mask_paths = [], []
-
-    # Use the inhale scans as the reference list
-    for f_name in sorted(os.listdir(inhale_dir)):
-        base_name = f_name.replace('.npy', '')
-        inhale_path = os.path.join(inhale_dir, f_name)
-        exhale_path = os.path.join(exhale_dir, f_name)
-        inhale_mask_path = os.path.join(inhale_masks_dir, f"{base_name}_INSP_mask.npy")
-        exhale_mask_path = os.path.join(exhale_masks_dir, f"{base_name}_EXP_mask.npy")
-
-        if os.path.exists(exhale_path) and os.path.exists(inhale_mask_path) and os.path.exists(exhale_mask_path):
-            train_inhale_paths.append(inhale_path)
-            train_exhale_paths.append(exhale_path)
-            train_inhale_mask_paths.append(inhale_mask_path)
-            train_exhale_mask_paths.append(exhale_mask_path)
-        elif local_rank == 0:
-            print(f"--> Warning: Skipping incomplete quadruplet for base file: {f_name}")
-
-    if local_rank == 0:
-        print(f"--- Found {len(train_inhale_paths)} complete data quadruplets. ---")
-    if len(train_inhale_paths) == 0:
-        raise FileNotFoundError("No complete data quadruplets found! Check data directories and filenames.")
-
-    # Apply debug slicing if enabled
     if args.debug:
-        train_inhale_paths = train_inhale_paths[:4]
-        train_exhale_paths = train_exhale_paths[:4]
-        train_inhale_mask_paths = train_inhale_mask_paths[:4]
-        train_exhale_mask_paths = train_exhale_mask_paths[:4]
+        complete_files = complete_files[:4]
         args.epochs = 2
-        if local_rank == 0:
-            print(f"--- Debug mode active. Using {len(train_inhale_paths)} scans for {args.epochs} epochs. ---")
+        if rank == 0: print(f"--- Debug mode active. Using {len(complete_files)} scans for {args.epochs} epochs. ---")
 
-    train_dataset = NumpyDataset(
-        train_inhale_paths, train_exhale_paths, train_inhale_mask_paths, train_exhale_mask_paths
-    )
+    train_dataset = NpyDataset(complete_files)
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers, pin_memory=True, sampler=train_sampler)
     
-    # --- DDP: Use DistributedSampler ---
-    train_sampler = DistributedSampler(train_dataset)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=4, pin_memory=True)
+    model = CycleTransMorph().to(rank)
+    ddp_model = DDP(model, device_ids=[rank])
+    optimizer = torch.optim.Adam(ddp_model.parameters(), lr=args.lr, betas=(args.beta1, 0.999))
+    
+    sim_loss = NCCLoss().to(rank)
+    reg_loss = GradientSmoothingLoss().to(rank)
+    cycle_loss = CycleConsistencyLoss().to(rank)
+    scaler = GradScaler()
+    
+    if rank == 0: print("--- Starting Training ---")
+    
+    fixed_viz_inhale, fixed_viz_exhale = next(iter(train_loader))
+    fixed_viz_inhale = fixed_viz_inhale.to(rank)
+    fixed_viz_exhale = fixed_viz_exhale.to(rank)
 
-    # --- Model, Loss, and Optimizer ---
-    model = CycleTransMorph(img_size=(args.img_size, args.img_size, args.img_size)).to(local_rank)
-    
-    # --- DDP: Wrap the model ---
-    model = DDP(model, device_ids=[local_rank])
-    
-    stn = SpatialTransformer(size=(args.img_size, args.img_size, args.img_size)).to(local_rank)
-    sim_loss_fn = NCCLoss().to(local_rank)
-    reg_loss_fn = GradientSmoothingLoss().to(local_rank)
-    cycle_loss_fn = CycleConsistencyLoss().to(local_rank)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-
-    # --- Training Loop ---
-    if local_rank == 0:
-        print("--- Starting Training ---")
-        
     for epoch in range(args.epochs):
-        model.train()
-        
-        # --- DDP: Set the epoch for the sampler ---
+        ddp_model.train()
         train_sampler.set_epoch(epoch)
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}", disable=(rank!=0))
         
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}", disable=(local_rank != 0))
-
-        for i, (inhale, exhale, inhale_mask, exhale_mask) in enumerate(pbar):
-            inhale, exhale = inhale.to(local_rank), exhale.to(local_rank)
-            inhale_mask, exhale_mask = inhale_mask.to(local_rank), exhale_mask.to(local_rank)
-
+        for i, (inhale, exhale) in enumerate(progress_bar):
+            inhale, exhale = inhale.to(rank), exhale.to(rank)
             optimizer.zero_grad()
-
-            warped_inhale, dvf_i_to_e, svf_i_to_e = model(inhale, exhale)
-            warped_exhale, dvf_e_to_i, svf_e_to_i = model(exhale, inhale)
-
-            loss_sim_i_to_e = sim_loss_fn(warped_inhale, exhale, exhale_mask)
-            loss_sim_e_to_i = sim_loss_fn(warped_exhale, inhale, inhale_mask)
-            loss_sim = loss_sim_i_to_e + loss_sim_e_to_i
-
-            loss_reg = reg_loss_fn(svf_i_to_e) + reg_loss_fn(svf_e_to_i)
-
-            reconstructed_inhale = stn(warped_exhale, dvf_i_to_e)
-            reconstructed_exhale = stn(warped_inhale, dvf_e_to_i)
-            loss_cycle = cycle_loss_fn(inhale, reconstructed_inhale) + cycle_loss_fn(exhale, reconstructed_exhale)
-
-            total_loss = loss_sim + args.lambda_reg * loss_reg + args.lambda_cycle * loss_cycle
-            total_loss.backward()
-            optimizer.step()
             
-            if local_rank == 0:
-                pbar.set_postfix({
-                    "Total": f"{total_loss.item():.4f}", "Sim": f"{loss_sim.item():.4f}",
-                    "Reg": f"{loss_reg.item():.4f}", "Cycle": f"{loss_cycle.item():.4f}"
-                })
-                wandb.log({
-                    "step_total_loss": total_loss.item(), "step_sim_loss": loss_sim.item(),
-                    "step_reg_loss": loss_reg.item(), "step_cycle_loss": loss_cycle.item()
-                })
+            with autocast():
+                warped_inhale, dvf_i_to_e, svf_i_to_e = ddp_model(inhale, exhale)
+                warped_exhale, dvf_e_to_i, svf_e_to_i = ddp_model(exhale, inhale)
+                reconstructed_inhale = model.module.spatial_transformer(warped_exhale, dvf_i_to_e)
+                reconstructed_exhale = model.module.spatial_transformer(warped_inhale, dvf_e_to_i)
+                
+                loss_sim = sim_loss(warped_inhale, exhale)
+                loss_reg = reg_loss(svf_i_to_e) + reg_loss(svf_e_to_i)
+                loss_cycle = cycle_loss(inhale, reconstructed_inhale) + cycle_loss(exhale, reconstructed_exhale)
+                total_loss = loss_sim + args.reg_lambda * loss_reg + args.cycle_lambda * loss_cycle
 
-        if local_rank == 0 and (epoch + 1) % args.save_interval == 0 and not args.debug:
-            save_path = os.path.join(args.save_dir, f"cycletransmorph_epoch_{epoch+1}.pth")
-            torch.save(model.module.state_dict(), save_path)
-            print(f"Model saved to {save_path}")
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
+            if rank == 0 and not args.debug:
+                step = epoch * len(train_loader) + i
+                wandb.log({"step_total_loss": total_loss.item(), "step_sim_loss": loss_sim.item(), 
+                           "step_reg_loss": loss_reg.item(), "step_cycle_loss": loss_cycle.item()}, step=step)
+
+        if rank == 0 and not args.debug:
+            # --- Visual Inspection ---
+            if (epoch + 1) % args.viz_interval == 0:
+                ddp_model.eval()
+                with torch.no_grad(), autocast():
+                    slice_idx = fixed_viz_inhale.shape[2] // 2
+                    sample_inhale = fixed_viz_inhale[0:1]
+                    sample_exhale = fixed_viz_exhale[0:1]
+                    warped_inhale_viz, dvf_i_to_e_viz, _ = ddp_model(sample_inhale, sample_exhale)
+                    
+                    inhale_slice = sample_inhale.squeeze().cpu().numpy()[slice_idx, :, :]
+                    exhale_slice = sample_exhale.squeeze().cpu().numpy()[slice_idx, :, :]
+                    warped_inhale_slice = warped_inhale_viz.squeeze().cpu().numpy()[slice_idx, :, :]
+                    dvf_mag_slice = torch.norm(dvf_i_to_e_viz.squeeze().cpu(), dim=0).numpy()[slice_idx, :, :]
+                    
+                    images = [
+                        wandb.Image(inhale_slice, caption="Original Inhale"),
+                        wandb.Image(exhale_slice, caption="Target Exhale"),
+                        wandb.Image(warped_inhale_slice, caption="Warped Inhale"),
+                        wandb.Image(dvf_mag_slice, caption="DVF Magnitude")
+                    ]
+                    wandb.log({"Visualizations": images}, step=(epoch + 1) * len(train_loader))
+                ddp_model.train()
+
+            if (epoch + 1) % args.val_interval == 0:
+                torch.save(ddp_model.module.state_dict(), f"ctm_epoch_{epoch+1}.pth")
+                
     cleanup_ddp()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to the directory containing processed .npy files")
-    parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save model checkpoints")
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--img_size", type=int, default=128, help="Size of the input images (assumed to be cubes)")
-    parser.add_argument("--lambda_reg", type=float, default=1.0, help="Weight for the regularization loss")
-    parser.add_argument("--lambda_cycle", type=float, default=1.0, help="Weight for the cycle consistency loss")
-    parser.add_argument("--save_interval", type=int, default=10, help="Save model every N epochs")
-    parser.add_argument("--debug", action='store_true', help="Run in debug mode with a small dataset subset")
-
+    parser.add_argument('--file_list', type=str, default='training_files.txt', help='Path to the text file containing training file paths')
+    # All other arguments remain the same
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--batch_size', type=int, default=2)
+    parser.add_argument('--n_workers', type=int, default=8)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--beta1', type=float, default=0.5)
+    parser.add_argument('--reg_lambda', type=float, default=0.02)
+    parser.add_argument('--cycle_lambda', type=float, default=0.1)
+    parser.add_argument('--val_interval', type=int, default=5)
+    parser.add_argument('--viz_interval', type=int, default=1)
+    parser.add_argument('--run_name', type=str, default='ctm_training_run')
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--dataset_fraction', type=float, default=1.0)
     args = parser.parse_args()
-    os.makedirs(args.save_dir, exist_ok=True)
     train(args)

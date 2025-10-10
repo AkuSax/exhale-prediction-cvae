@@ -1,6 +1,9 @@
+# losses.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os # Import os for RANK check
 
 class NCCLoss(nn.Module):
     """
@@ -32,6 +35,15 @@ class NCCLoss(nn.Module):
         numerator = torch.mean(I_minus_mean * J_minus_mean, dim=[1, 2, 3, 4])
         denominator = I_std * J_std
 
+        # --- DEBUGGING PRINTS for NCC Loss ---
+        if 'RANK' in os.environ and os.environ['RANK'] == '0':
+            print(f"\n[NCC Debug] I_std min/max: {I_std.min().item():.6f}/{I_std.max().item():.6f}")
+            print(f"[NCC Debug] J_std min/max: {J_std.min().item():.6f}/{J_std.max().item():.6f}")
+            print(f"[NCC Debug] denominator (I_std * J_std) min/max: {(I_std * J_std).min().item():.6f}/{(I_std * J_std).max().item():.6f}")
+            print(f"[NCC Debug] denominator + eps min/max: {(denominator.squeeze() + self.eps).min().item():.6f}/{(denominator.squeeze() + self.eps).max().item():.6f}")
+            print(f"[NCC Debug] numerator min/max: {numerator.min().item():.6f}/{numerator.max().item():.6f}")
+            print(f"[NCC Debug] NCC term (numerator / (denominator + eps)) min/max: {(numerator / (denominator.squeeze() + self.eps)).min().item():.6f}/{(numerator / (denominator.squeeze() + self.eps)).max().item():.6f}")
+            
         return 1 - torch.mean(numerator / (denominator.squeeze() + self.eps))
 
 
@@ -43,12 +55,6 @@ class GradientSmoothingLoss(nn.Module):
         super().__init__()
 
     def forward(self, vf):
-        # --- THIS IS THE FIX ---
-        # Ensure the input is a 5D tensor before indexing
-        if vf.dim() == 4:
-            # Add a batch dimension if it's missing
-            vf = vf.unsqueeze(0)
-            
         dy = torch.abs(vf[:, :, 1:, :, :] - vf[:, :, :-1, :, :])
         dx = torch.abs(vf[:, :, :, 1:, :] - vf[:, :, :, :-1, :])
         dz = torch.abs(vf[:, :, :, :, 1:] - vf[:, :, :, :, :-1])
