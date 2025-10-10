@@ -1,9 +1,6 @@
-#!/bin/bash
-
-export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export NCCL_SOCKET_IFNAME=ibs9
 
-torchrun --nproc_per_node=4 train_ctm.py \
+torchrun --nproc_per_node=2 train_ctm.py \
     --data_dir "/mnt/hot/public/Akul/exhale_pred_data" \
     --epochs 200 \
     --batch_size 2 \

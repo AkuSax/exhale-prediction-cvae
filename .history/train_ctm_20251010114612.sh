@@ -1,6 +1,5 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export NCCL_SOCKET_IFNAME=ibs9
 
 torchrun --nproc_per_node=4 train_ctm.py \

@@ -7,69 +7,14 @@ import wandb
 import glob
 import random
 import argparse
+
 import numpy as np
 import nibabel as nib
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
 
-# Correctly import the model from your models.py file
-from models import CycleTransMorph 
+from models import CycleTransMorph, NiftiDataset, PairedNiftiDataset
 from losses import NCC, Grad, DiceLoss
-
-# --- ADDED MISSING DATASET CLASSES ---
-
-class NiftiDataset(Dataset):
-    """
-    Basic dataset for loading NIfTI images from a list of file paths.
-    """
-    def __init__(self, file_paths):
-        self.file_paths = file_paths
-
-    def __len__(self):
-        return len(self.file_paths)
-
-    def __getitem__(self, idx):
-        file_path = self.file_paths[idx]
-        nii_img = nib.load(file_path)
-        img_data = nii_img.get_fdata().astype(np.float32)
-        
-        # Add channel dimension
-        if len(img_data.shape) == 3:
-            img_data = np.expand_dims(img_data, axis=0)
-            
-        return torch.from_numpy(img_data)
-
-class PairedNiftiDataset(Dataset):
-    """
-    Dataset for loading paired NIfTI images (inhale, exhale, and their masks).
-    """
-    def __init__(self, file_quadruplets):
-        self.file_quadruplets = file_quadruplets
-
-    def __len__(self):
-        return len(self.file_quadruplets)
-
-    def __getitem__(self, idx):
-        inhale_path, exhale_path, inhale_mask_path, exhale_mask_path = self.file_quadruplets[idx]
-        
-        # Load images and masks
-        inhale_img = nib.load(inhale_path).get_fdata().astype(np.float32)
-        exhale_img = nib.load(exhale_path).get_fdata().astype(np.float32)
-        inhale_mask = nib.load(inhale_mask_path).get_fdata().astype(np.float32)
-        exhale_mask = nib.load(exhale_mask_path).get_fdata().astype(np.float32)
-        
-        # Add channel dimension
-        inhale_img = np.expand_dims(inhale_img, axis=0)
-        exhale_img = np.expand_dims(exhale_img, axis=0)
-        inhale_mask = np.expand_dims(inhale_mask, axis=0)
-        exhale_mask = np.expand_dims(exhale_mask, axis=0)
-        
-        return (
-            torch.from_numpy(inhale_img),
-            torch.from_numpy(exhale_img),
-            torch.from_numpy(inhale_mask),
-            torch.from_numpy(exhale_mask)
-        )
 
 # --- DEBUG: Function to print with rank ---
 def print_rank(msg):
@@ -138,26 +83,32 @@ def train(args):
     file_list = None
     if rank == 0:
         file_list = get_file_list(args.data_dir, args.dataset_fraction)
+        # Convert file_list to a tensor or some object that can be broadcasted
+        # For simplicity, we can just broadcast the list of lists.
         file_list_obj = [file_list]
     else:
         file_list_obj = [None]
         
+    # Broadcast the file list from rank 0 to all other processes
     print_rank("Broadcasting file list from rank 0 to all other ranks...")
     dist.broadcast_object_list(file_list_obj, src=0)
     print_rank("File list broadcast complete.")
     
+    # All processes now have the same file list
     file_list = file_list_obj[0]
     print_rank(f"Received {len(file_list)} files for training.")
 
+    # Create dataset and dataloader
     print_rank("Creating dataset and dataloader...")
     dataset = PairedNiftiDataset(file_list)
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers, sampler=sampler, pin_memory=True)
     print_rank("Dataset and dataloader created.")
 
+    # Model and optimizer
     print_rank("Initializing model and optimizer...")
-    # CORRECTED: Use CycleTransMorph and its correct arguments
     model = CycleTransMorph(img_size=(128, 128, 128)).to(rank)
+
     ddp_model = DDP(model, device_ids=[rank])
     optimizer = torch.optim.Adam(ddp_model.parameters(), lr=args.lr)
     print_rank("Model and optimizer initialized.")
@@ -168,29 +119,38 @@ def train(args):
     dice_loss = DiceLoss()
     scaler = GradScaler()
     
+    # Training loop
     print_rank("--- Starting Training Loop ---")
     for epoch in range(args.epochs):
-        sampler.set_epoch(epoch)
+        sampler.set_epoch(epoch) # Important for shuffling in DDP
         epoch_loss = 0
+        
+        # Wrap dataloader with tqdm only on rank 0
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}") if rank == 0 else dataloader
 
         for i, (inhale, exhale, inhale_mask, exhale_mask) in enumerate(pbar):
             print_rank(f"Batch {i+1}/{len(dataloader)} loaded.")
             
             inhale, exhale, inhale_mask, exhale_mask = inhale.to(rank), exhale.to(rank), inhale_mask.to(rank), exhale_mask.to(rank)
+            
             optimizer.zero_grad()
             
             with autocast():
+                # Forward pass
                 warped_inhale, dvf_i_to_e, svf_i_to_e = ddp_model(inhale, exhale)
                 warped_exhale, dvf_e_to_i, svf_e_to_i = ddp_model(exhale, inhale)
+                
+                # Reconstructions for cycle consistency
                 reconstructed_inhale = ddp_model.module.spatial_transformer(warped_exhale, dvf_i_to_e)
                 reconstructed_exhale = ddp_model.module.spatial_transformer(warped_inhale, dvf_e_to_i)
 
+                # Loss calculation
                 loss_recon_i = ncc_loss(reconstructed_inhale, inhale)
                 loss_recon_e = ncc_loss(reconstructed_exhale, exhale)
                 loss_sim_i = ncc_loss(warped_inhale, exhale)
                 loss_sim_e = ncc_loss(warped_exhale, inhale)
                 loss_reg = grad_loss(dvf_i_to_e) + grad_loss(dvf_e_to_i)
+                
                 total_loss = loss_sim_i + loss_sim_e + loss_recon_i + loss_recon_e + args.alpha * loss_reg
 
             scaler.scale(total_loss).backward()
@@ -223,7 +183,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--alpha', type=float, default=1.0, help="Regularization weight")
     parser.add_argument('--dataset_fraction', type=float, default=1.0)
-    parser.add_argument('--latent_dim', type=int, default=16) # This is unused by CycleTransMorph but kept for arg parsing
+    parser.add_argument('--latent_dim', type=int, default=16)
     args = parser.parse_args()
     
     train(args)
