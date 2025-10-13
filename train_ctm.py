@@ -11,38 +11,14 @@ import numpy as np
 import nibabel as nib
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
-# Correctly import the model from your models.py file
-from models import CycleTransMorph 
-from losses import NCC, Grad, DiceLoss
+from models import CycleTransMorph
+from losses import NCCLoss, GradientSmoothingLoss
 
-# --- ADDED MISSING DATASET CLASSES ---
-
-class NiftiDataset(Dataset):
-    """
-    Basic dataset for loading NIfTI images from a list of file paths.
-    """
-    def __init__(self, file_paths):
-        self.file_paths = file_paths
-
-    def __len__(self):
-        return len(self.file_paths)
-
-    def __getitem__(self, idx):
-        file_path = self.file_paths[idx]
-        nii_img = nib.load(file_path)
-        img_data = nii_img.get_fdata().astype(np.float32)
-        
-        # Add channel dimension
-        if len(img_data.shape) == 3:
-            img_data = np.expand_dims(img_data, axis=0)
-            
-        return torch.from_numpy(img_data)
+# --- DATASET CLASSES (for .npy files) ---
 
 class PairedNiftiDataset(Dataset):
-    """
-    Dataset for loading paired NIfTI images (inhale, exhale, and their masks).
-    """
     def __init__(self, file_quadruplets):
         self.file_quadruplets = file_quadruplets
 
@@ -52,13 +28,11 @@ class PairedNiftiDataset(Dataset):
     def __getitem__(self, idx):
         inhale_path, exhale_path, inhale_mask_path, exhale_mask_path = self.file_quadruplets[idx]
         
-        # Load images and masks
-        inhale_img = nib.load(inhale_path).get_fdata().astype(np.float32)
-        exhale_img = nib.load(exhale_path).get_fdata().astype(np.float32)
-        inhale_mask = nib.load(inhale_mask_path).get_fdata().astype(np.float32)
-        exhale_mask = nib.load(exhale_mask_path).get_fdata().astype(np.float32)
+        inhale_img = np.load(inhale_path).astype(np.float32)
+        exhale_img = np.load(exhale_path).astype(np.float32)
+        inhale_mask = np.load(inhale_mask_path).astype(np.float32)
+        exhale_mask = np.load(exhale_mask_path).astype(np.float32)
         
-        # Add channel dimension
         inhale_img = np.expand_dims(inhale_img, axis=0)
         exhale_img = np.expand_dims(exhale_img, axis=0)
         inhale_mask = np.expand_dims(inhale_mask, axis=0)
@@ -71,113 +45,120 @@ class PairedNiftiDataset(Dataset):
             torch.from_numpy(exhale_mask)
         )
 
-# --- DEBUG: Function to print with rank ---
-def print_rank(msg):
-    rank = dist.get_rank() if dist.is_initialized() else 'N/A'
-    print(f"--- [Rank {rank}] {msg}", flush=True)
+# --- DDP and Training Functions ---
 
 def setup_ddp(rank, world_size):
-    """Initializes the distributed process group."""
-    print_rank(f"Initializing DDP process group for world size {world_size}...")
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
-    print_rank("DDP process group initialized and CUDA device set.")
 
 def cleanup_ddp():
-    """Cleans up the distributed process group."""
-    print_rank("Cleaning up DDP process group.")
     dist.destroy_process_group()
 
 def get_file_list(data_dir, dataset_fraction):
-    """
-    Gets the list of files for training, ensuring all necessary files exist.
-    This function should only be run on the main process (rank 0).
-    """
-    print_rank("Starting initial data scan...")
-    inhale_files = sorted(glob.glob(os.path.join(data_dir, 'inhale', '*.nii.gz')))
-    
-    print_rank(f"Found {len(inhale_files)} potential inhale files. Now verifying pairs...")
-    
+    inhale_files = sorted(glob.glob(os.path.join(data_dir, 'inhale', '*.npy')))
     verified_files = []
-    for inhale_file in tqdm(inhale_files, desc="[Rank 0] Verifying file sets"):
-        base_name = os.path.basename(inhale_file)
-        exhale_file = os.path.join(data_dir, 'exhale', base_name)
-        inhale_mask_file = os.path.join(data_dir, 'inhale_mask', base_name)
-        exhale_mask_file = os.path.join(data_dir, 'exhale_mask', base_name)
+    
+    file_iterator = inhale_files
+    if int(os.environ.get('RANK', 0)) == 0:
+        file_iterator = tqdm(inhale_files, desc="[Rank 0] Verifying file sets")
 
+    for inhale_file in file_iterator:
+        base_name_with_ext = os.path.basename(inhale_file)
+        base_name = base_name_with_ext.replace('.npy', '')
+
+        exhale_file = os.path.join(data_dir, 'exhale', base_name_with_ext)
+        inhale_mask_file = os.path.join(data_dir, 'masks', 'inhale', f"{base_name}_INSP_mask.npy")
+        exhale_mask_file = os.path.join(data_dir, 'masks', 'exhale', f"{base_name}_EXP_mask.npy")
+        
         if all(os.path.exists(f) for f in [exhale_file, inhale_mask_file, exhale_mask_file]):
             verified_files.append((inhale_file, exhale_file, inhale_mask_file, exhale_mask_file))
 
-    print_rank(f"Found {len(verified_files)} complete data quadruplets.")
-
     if dataset_fraction < 1.0:
         num_files_to_use = int(len(verified_files) * dataset_fraction)
+        random.seed(42)
         verified_files = random.sample(verified_files, num_files_to_use)
-        print_rank(f"Using a {dataset_fraction*100:.1f}% subset of data ({len(verified_files)} scans).")
-        
     return verified_files
 
+def save_and_log_images(save_dir, epoch, inhale, exhale, warped_inhale):
+    moving = inhale.cpu().numpy().squeeze()
+    warped = warped_inhale.cpu().numpy().squeeze()
+    fixed = exhale.cpu().numpy().squeeze()
+
+    local_img_dir = os.path.join(save_dir, 'images')
+    os.makedirs(local_img_dir, exist_ok=True)
+    np.save(os.path.join(local_img_dir, f'epoch_{epoch+1}_moving.npy'), moving)
+    np.save(os.path.join(local_img_dir, f'epoch_{epoch+1}_warped.npy'), warped)
+    np.save(os.path.join(local_img_dir, f'epoch_{epoch+1}_fixed_TARGET.npy'), fixed)
+
+    def normalize_slice(sl):
+        sl_min, sl_max = sl.min(), sl.max()
+        return (sl - sl_min) / (sl_max - sl_min) if sl_max > sl_min else sl
+
+    sl_x, sl_y, sl_z = [s // 2 for s in moving.shape]
+
+    axial_row = np.concatenate([normalize_slice(moving[sl_z, :, :]), normalize_slice(warped[sl_z, :, :]), normalize_slice(fixed[sl_z, :, :])], axis=1)
+    sagittal_row = np.concatenate([normalize_slice(moving[:, :, sl_x]), normalize_slice(warped[:, :, sl_x]), normalize_slice(fixed[:, :, sl_x])], axis=1)
+    coronal_row = np.concatenate([normalize_slice(moving[:, sl_y, :]), normalize_slice(warped[:, sl_y, :]), normalize_slice(fixed[:, sl_y, :])], axis=1)
+    
+    max_width = max(axial_row.shape[1], sagittal_row.shape[1], coronal_row.shape[1])
+    
+    def pad_row(row, width):
+        padding = width - row.shape[1]
+        pad_left, pad_right = padding // 2, padding - (padding // 2)
+        return np.pad(row, ((0, 0), (pad_left, pad_right)), 'constant')
+
+    grid = np.concatenate([pad_row(axial_row, max_width), pad_row(sagittal_row, max_width), pad_row(coronal_row, max_width)], axis=0)
+
+    wandb.log({"validation_images": wandb.Image(grid, caption=f"Epoch {epoch+1}: Views | Cols: Moving, Warped, Fixed")})
+
 def train(args):
-    """
-    Main training function.
-    """
-    # DDP Setup
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     setup_ddp(rank, world_size)
 
-    # Logging and setup only on rank 0
     if rank == 0:
-        print("--- [Rank 0] Initializing wandb...")
-        wandb.init(project="exhale_pred", name="ctm_run")
-        if not os.path.exists('checkpoints'):
-            os.makedirs('checkpoints')
-        print("--- [Rank 0] wandb and checkpoints directory initialized.")
+        os.makedirs(args.save_dir, exist_ok=True)
+        wandb.init(
+            project="exhale_pred", 
+            name=os.path.basename(args.save_dir),
+            settings=wandb.Settings(start_method="thread")
+        )
 
-    # Get file list on rank 0
-    file_list = None
+    file_list_obj = [None]
     if rank == 0:
         file_list = get_file_list(args.data_dir, args.dataset_fraction)
         file_list_obj = [file_list]
-    else:
-        file_list_obj = [None]
-        
-    print_rank("Broadcasting file list from rank 0 to all other ranks...")
-    dist.broadcast_object_list(file_list_obj, src=0)
-    print_rank("File list broadcast complete.")
     
+    dist.broadcast_object_list(file_list_obj, src=0)
     file_list = file_list_obj[0]
-    print_rank(f"Received {len(file_list)} files for training.")
+    
+    if not file_list:
+        if rank == 0: print(f"ERROR: No complete data sets found in {args.data_dir}.")
+        cleanup_ddp(); return
 
-    print_rank("Creating dataset and dataloader...")
     dataset = PairedNiftiDataset(file_list)
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers, sampler=sampler, pin_memory=True)
-    print_rank("Dataset and dataloader created.")
 
-    print_rank("Initializing model and optimizer...")
-    # CORRECTED: Use CycleTransMorph and its correct arguments
     model = CycleTransMorph(img_size=(128, 128, 128)).to(rank)
     ddp_model = DDP(model, device_ids=[rank])
     optimizer = torch.optim.Adam(ddp_model.parameters(), lr=args.lr)
-    print_rank("Model and optimizer initialized.")
+    
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
-    # Losses
-    ncc_loss = NCC()
-    grad_loss = Grad()
-    dice_loss = DiceLoss()
+    ncc_loss = NCCLoss()
+    grad_loss = GradientSmoothingLoss()
     scaler = GradScaler()
     
-    print_rank("--- Starting Training Loop ---")
+    best_loss = float('inf')
+
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)
         epoch_loss = 0
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}") if rank == 0 else dataloader
 
         for i, (inhale, exhale, inhale_mask, exhale_mask) in enumerate(pbar):
-            print_rank(f"Batch {i+1}/{len(dataloader)} loaded.")
-            
-            inhale, exhale, inhale_mask, exhale_mask = inhale.to(rank), exhale.to(rank), inhale_mask.to(rank), exhale_mask.to(rank)
+            inhale, exhale = inhale.to(rank), exhale.to(rank)
             optimizer.zero_grad()
             
             with autocast():
@@ -200,30 +181,48 @@ def train(args):
             epoch_loss += total_loss.item()
             
             if rank == 0:
-                pbar.set_postfix({"Loss": total_loss.item()})
-                wandb.log({"loss": total_loss.item()})
-        
-        if rank == 0:
+                
+                wandb.log({
+                    "step_loss": total_loss.item(),
+                    "loss_recon_inhale": loss_recon_i.item(),
+                    "loss_recon_exhale": loss_recon_e.item(),
+                    "loss_similarity_inhale": loss_sim_i.item(),
+                    "loss_similarity_exhale": loss_sim_e.item(),
+                    "loss_regularization": loss_reg.item(),
+                })
+            if rank == 0 and (epoch + 1) % args.val_interval == 0 and i == 0:
+                with torch.no_grad():
+                     save_and_log_images(args.save_dir, epoch, inhale[0], exhale[0], warped_inhale[0])
+
+        if rank == 0 and len(dataloader) > 0:
             avg_loss = epoch_loss / len(dataloader)
             print(f"Epoch {epoch+1}/{args.epochs}, Average Loss: {avg_loss}")
-            wandb.log({"epoch_loss": avg_loss, "epoch": epoch})
+            wandb.log({"epoch_avg_loss": avg_loss, "epoch": epoch, "learning_rate": scheduler.get_last_lr()[0]})
             
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                print(f"--- New best model found at epoch {epoch+1} with loss {best_loss:.4f}. Saving... ---")
+                torch.save(ddp_model.module.state_dict(), os.path.join(args.save_dir, 'best_model.pth'))
+
             if (epoch + 1) % args.val_interval == 0:
-                torch.save(ddp_model.module.state_dict(), f'checkpoints/ctm_epoch_{epoch+1}.pth')
+                torch.save(ddp_model.module.state_dict(), os.path.join(args.save_dir, f'ctm_epoch_{epoch+1}.pth'))
+        
+        scheduler.step()
 
     cleanup_ddp()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True)
+    parser.add_argument('--save_dir', type=str, required=True)
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--n_workers', type=int, default=8)
     parser.add_argument('--val_interval', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--alpha', type=float, default=1.0, help="Regularization weight")
+    parser.add_argument('--alpha', type=float, default=1.0)
     parser.add_argument('--dataset_fraction', type=float, default=1.0)
-    parser.add_argument('--latent_dim', type=int, default=16) # This is unused by CycleTransMorph but kept for arg parsing
+    parser.add_argument('--latent_dim', type=int, default=16)
     args = parser.parse_args()
     
     train(args)

@@ -47,6 +47,7 @@ class CycleTransMorph(nn.Module):
         super().__init__()
         self.img_size = img_size
         self.transformer_backbone = SwinUNETR(
+            img_size=self.img_size,  # <-- ADD THIS LINE
             spatial_dims=3, in_channels=in_channels, out_channels=16,
             feature_size=feature_size, use_checkpoint=True,
         )

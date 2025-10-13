@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 .history/
+checkpoints/
 *.pyc
 *.pyo
 *.pyd
