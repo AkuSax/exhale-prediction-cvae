@@ -5,14 +5,13 @@ channels:
   - conda-forge
 dependencies:
   - python=3.10
-  - pytorch
-  - torchvision
-  - torchaudio
+  - pytorch=2.5.1
+  - torchvision=0.20.1
+  - torchaudio=2.5.1
   - pytorch-cuda=12.1
-  - monai
-  - scikit-image
-  - scikit-learn
-  - scipy
+  - monai=1.5.0
+  - scikit-image=0.25.2
+  - scikit-learn=1.7.1
   - pandas
   - nibabel
   - jupyter
