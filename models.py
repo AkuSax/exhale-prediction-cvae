@@ -1,5 +1,3 @@
-# models.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -65,11 +63,13 @@ class CycleTransMorph(nn.Module):
         else:
             transformer_features = transformer_output
 
+        # FIX: Permute the backbone output to correct swapped (Width, Depth) dimensions.
+        transformer_features = transformer_features.permute(0, 1, 2, 4, 3)
+
         svf = self.svf_head(transformer_features)
         dvf = self.diffeomorphic_layer(svf)
         warped_image = self.spatial_transformer(moving, dvf)
         return warped_image, dvf, svf
-
 class SpatialTransformer(nn.Module):
     """
     N-D Spatial Transformer, robust to DDP.
