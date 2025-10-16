@@ -6,9 +6,6 @@ checkpoints/
 *.pyo
 *.pyd
 
-# Notebooks
-*.ipynb
-
 # Data Files
 *.npy
 *.nii.gz
