@@ -6,8 +6,8 @@ checkpoints/
 *.pyo
 *.pyd
 
-# Conda environment
-/exhale_pred/
+# Notebooks
+*.ipynb
 
 # Data Files
 *.npy

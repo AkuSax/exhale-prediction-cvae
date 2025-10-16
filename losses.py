@@ -33,7 +33,7 @@ class NCCLoss(nn.Module):
         
         ncc_term = numerator / (denominator.squeeze() + self.eps)
 
-        # --- Efficient Debugging: Only print if NCC is out of bounds ---
+        # ---Debugging: Only print if NCC is out of bounds ---
         if 'RANK' in os.environ and os.environ['RANK'] == '0':
             if not (ncc_term.min() >= -1 and ncc_term.max() <= 1):
                 print("\n--- WARNING: NCC Term Out of Bounds ---")

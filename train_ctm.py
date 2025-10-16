@@ -15,9 +15,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from models import CycleTransMorph
 from losses import NCCLoss, GradientSmoothingLoss
-
-# --- DATASET CLASSES (for .npy files) ---
-
 class PairedNiftiDataset(Dataset):
     def __init__(self, file_quadruplets):
         self.file_quadruplets = file_quadruplets
@@ -44,8 +41,6 @@ class PairedNiftiDataset(Dataset):
             torch.from_numpy(inhale_mask),
             torch.from_numpy(exhale_mask)
         )
-
-# --- DDP and Training Functions ---
 
 def setup_ddp(rank, world_size):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
