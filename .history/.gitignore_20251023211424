@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+history/
+checkpoints/
+*.pyc
+*.pyo
+*.pyd
+
+# Data Files
+*.npy
+*.nii.gz
+gif_frames_ortho/
+
+# Saved Models
+/model_runs
+/wandb
+*.pth
+*.pt
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store

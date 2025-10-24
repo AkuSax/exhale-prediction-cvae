@@ -1,6 +1,6 @@
 # Python
 __pycache__/
-.history/
+history/
 checkpoints/
 *.pyc
 *.pyo
@@ -9,6 +9,7 @@ checkpoints/
 # Data Files
 *.npy
 *.nii.gz
+gif_frames_ortho/
 
 # Saved Models
 /model_runs
