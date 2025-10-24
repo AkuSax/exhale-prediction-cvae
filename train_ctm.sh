@@ -11,4 +11,6 @@ torchrun --nproc_per_node=4 train_ctm.py \
     --n_workers 8 \
     --val_interval 5 \
     --lr 1e-4 \
-    --dataset_fraction 0.2
+    --dataset_fraction 0.2 \
+    --alpha 2.0
+    --alpha 2.0

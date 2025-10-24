@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from monai.networks.nets import SwinUNETR
 import os
 
 class ScalingAndSquaring(nn.Module):
