@@ -140,9 +140,9 @@ def train(args):
     optimizer = torch.optim.Adam(ddp_model.parameters(), lr=args.lr)
     
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
-
-    ncc_loss = NCCLoss()
-    grad_loss = GradientSmoothingLoss()
+    
+    ncc_loss = NCCLoss().to(rank)
+    grad_loss = GradientSmoothingLoss().to(rank)
     scaler = GradScaler()
     
     best_loss = float('inf')
@@ -154,6 +154,7 @@ def train(args):
 
         for i, (inhale, exhale, inhale_mask, exhale_mask) in enumerate(pbar):
             inhale, exhale = inhale.to(rank), exhale.to(rank)
+            inhale_mask, exhale_mask = inhale_mask.to(rank), exhale_mask.to(rank)
             optimizer.zero_grad()
             
             with autocast():
@@ -162,10 +163,10 @@ def train(args):
                 reconstructed_inhale = ddp_model.module.spatial_transformer(warped_exhale, dvf_i_to_e)
                 reconstructed_exhale = ddp_model.module.spatial_transformer(warped_inhale, dvf_e_to_i)
 
-                loss_recon_i = ncc_loss(reconstructed_inhale, inhale)
-                loss_recon_e = ncc_loss(reconstructed_exhale, exhale)
-                loss_sim_i = ncc_loss(warped_inhale, exhale)
-                loss_sim_e = ncc_loss(warped_exhale, inhale)
+                loss_sim_i = ncc_loss(warped_inhale, exhale, mask=exhale_mask)
+                loss_sim_e = ncc_loss(warped_exhale, inhale, mask=inhale_mask)
+                loss_recon_i = ncc_loss(reconstructed_inhale, inhale, mask=inhale_mask)
+                loss_recon_e = ncc_loss(reconstructed_exhale, exhale, mask=exhale_mask)
                 loss_reg = grad_loss(dvf_i_to_e) + grad_loss(dvf_e_to_i)
                 total_loss = loss_sim_i + loss_sim_e + loss_recon_i + loss_recon_e + args.alpha * loss_reg
 

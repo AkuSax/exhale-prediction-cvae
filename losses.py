@@ -4,46 +4,49 @@ import torch.nn as nn
 
 class NCCLoss(nn.Module):
     """
-    Normalized Cross-Correlation Loss with efficient, conditional debugging.
+    Normalized Cross-Correlation Loss
     """
     def __init__(self, eps=1e-5):
         super().__init__()
         self.eps = eps
 
     def forward(self, I, J, mask=None):
+        # I = warped_inhale, J = exhale (target)
         if I.dim() == 4: I = I.unsqueeze(0)
         if J.dim() == 4: J = J.unsqueeze(0)
         
-        I_mean = torch.mean(I, dim=[1, 2, 3, 4], keepdim=True)
-        J_mean = torch.mean(J, dim=[1, 2, 3, 4], keepdim=True)
-
-        I_std = torch.std(I, dim=[1, 2, 3, 4], keepdim=True)
-        J_std = torch.std(J, dim=[1, 2, 3, 4], keepdim=True)
-
-        I_minus_mean = I - I_mean
-        J_minus_mean = J - J_mean
-
         if mask is not None:
             if mask.dim() == 4: mask = mask.unsqueeze(0)
-            I_minus_mean = I_minus_mean * mask
-            J_minus_mean = J_minus_mean * mask
-
-        numerator = torch.mean(I_minus_mean * J_minus_mean, dim=[1, 2, 3, 4])
-        denominator = I_std * J_std
-        
-        ncc_term = numerator / (denominator.squeeze() + self.eps)
-
-        # ---Debugging: Only print if NCC is out of bounds ---
-        if 'RANK' in os.environ and os.environ['RANK'] == '0':
-            if not (ncc_term.min() >= -1 and ncc_term.max() <= 1):
-                print("\n--- WARNING: NCC Term Out of Bounds ---")
-                print(f"[NCC Debug] I_std min/max: {I_std.min().item():.6f}/{I_std.max().item():.6f}")
-                print(f"[NCC Debug] J_std min/max: {J_std.min().item():.6f}/{J_std.max().item():.6f}")
-                print(f"[NCC Debug] NCC term min/max: {ncc_term.min().item():.6f}/{ncc_term.max().item():.6f}")
-                print("--- End of Warning ---\n")
+            mask = mask.expand_as(I)
             
-        return 1 - torch.mean(ncc_term)
+            num_voxels = torch.sum(mask, dim=[1, 2, 3, 4], keepdim=True) + self.eps
+            
+            I_mean = torch.sum(I * mask, dim=[1, 2, 3, 4], keepdim=True) / num_voxels
+            J_mean = torch.sum(J * mask, dim=[1, 2, 3, 4], keepdim=True) / num_voxels
+            
+            I_std = torch.sqrt(torch.sum(torch.pow(I - I_mean, 2) * mask, dim=[1, 2, 3, 4], keepdim=True) / num_voxels)
+            J_std = torch.sqrt(torch.sum(torch.pow(J - J_mean, 2) * mask, dim=[1, 2, 3, 4], keepdim=True) / num_voxels)
+            
+            I_minus_mean = (I - I_mean) * mask
+            J_minus_mean = (J - J_mean) * mask
+            
+            numerator = torch.sum(I_minus_mean * J_minus_mean, dim=[1, 2, 3, 4]) / num_voxels.squeeze()
+            denom = I_std * J_std
 
+        else:
+            I_mean = torch.mean(I, dim=[1, 2, 3, 4], keepdim=True)
+            J_mean = torch.mean(J, dim=[1, 2, 3, 4], keepdim=True)
+            I_std = torch.std(I, dim=[1, 2, 3, 4], keepdim=True)
+            J_std = torch.std(J, dim=[1, 2, 3, 4], keepdim=True)
+            
+            I_minus_mean = I - I_mean
+            J_minus_mean = J - J_mean
+            
+            numerator = torch.mean(I_minus_mean * J_minus_mean, dim=[1, 2, 3, 4])
+            denom = I_std * J_std
+        
+        ncc = numerator / (denom.squeeze() + self.eps)
+        return 1 - torch.mean(ncc)
 class GradientSmoothingLoss(nn.Module):
     """
     L2 loss on the spatial gradients of a vector field.
