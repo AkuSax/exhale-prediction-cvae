@@ -114,3 +114,46 @@ class InverseConsistencyLoss(nn.Module):
 
         return self.l2_loss(cycle_error_fwd, torch.zeros_like(cycle_error_fwd)) + \
                self.l2_loss(cycle_error_bwd, torch.zeros_like(cycle_error_bwd))
+
+class VolumeConservationLoss(nn.Module):
+    """
+    Calculates a loss to penalize the difference between the average
+    Jacobian determinant and the ratio of lung mask volumes.
+    mean(det(J)) should be close to V_exhale / V_inhale.
+    """
+    def __init__(self, epsilon=1e-6):
+        super().__init__()
+        self.epsilon = epsilon
+
+    def _get_det(self, dvf):
+        # DVF shape is (B, C, D, H, W). C=3 (z, y, x)
+        grad_uz_dz, grad_uz_dy, grad_uz_dx = torch.gradient(dvf[:, 0], dim=(1, 2, 3))
+        grad_uy_dz, grad_uy_dy, grad_uy_dx = torch.gradient(dvf[:, 1], dim=(1, 2, 3))
+        grad_ux_dz, grad_ux_dy, grad_ux_dx = torch.gradient(dvf[:, 2], dim=(1, 2, 3))
+
+        J_11 = 1 + grad_ux_dx; J_12 = grad_ux_dy; J_13 = grad_ux_dz
+        J_21 = grad_uy_dx; J_22 = 1 + grad_uy_dy; J_23 = grad_uy_dz
+        J_31 = grad_uz_dx; J_32 = grad_uz_dy; J_33 = 1 + grad_uz_dz
+        
+        det = J_11 * (J_22 * J_33 - J_23 * J_32) \
+            - J_12 * (J_21 * J_33 - J_23 * J_31) \
+            + J_13 * (J_21 * J_32 - J_22 * J_31)
+        
+        return det
+
+    def forward(self, dvf, inhale_mask, exhale_mask):
+        # Calculate determinant map
+        det = self._get_det(dvf) # Shape (B, D, H, W)
+        
+        # Calculate mean determinant for each item in the batch
+        # We average over the whole volume, not just the mask
+        avg_det = torch.mean(det, dim=(1, 2, 3)) # Shape (B)
+        
+        # Calculate target volume ratio for each item in the batch
+        v_inhale = torch.sum(inhale_mask, dim=(1, 2, 3, 4)) # Shape (B)
+        v_exhale = torch.sum(exhale_mask, dim=(1, 2, 3, 4)) # Shape (B)
+        
+        target_ratio = v_exhale / (v_inhale + self.epsilon) # Shape (B)
+        
+        # Return the L2 (MSE) loss between the average det and the target ratio
+        return F.mse_loss(avg_det, target_ratio)

@@ -15,7 +15,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from monai.metrics import DiceMetric
 
 from models import CycleTransMorph
-from losses import NCCLoss, GradientSmoothingLoss, InverseConsistencyLoss
+from losses import NCCLoss, GradientSmoothingLoss, InverseConsistencyLoss, VolumeConservationLoss
 class PairedNiftiDataset(Dataset):
     def __init__(self, file_quadruplets):
         self.file_quadruplets = file_quadruplets
@@ -121,22 +121,24 @@ def get_jacobian_stats(dvf_batch):
         dvf_single = dvf[i]
         
         # Get gradients for each component (disp_z, disp_y, disp_x)
+        # np.gradient returns (dz, dy, dx)
         grad_uz = np.gradient(dvf_single[0]) 
         grad_uy = np.gradient(dvf_single[1])
         grad_ux = np.gradient(dvf_single[2])
 
         # J = I + grad(DVF)
-        J_11 = 1 + grad_ux[2]
-        J_12 = grad_ux[1]  
-        J_13 = grad_ux[0]  
+        # J_11 = 1 + dux/dx
+        J_11 = 1 + grad_ux[2] # dx
+        J_12 = grad_ux[1]     # dy
+        J_13 = grad_ux[0]     # dz
         
-        J_21 = grad_uy[2]  
-        J_22 = 1 + grad_uy[1]
-        J_23 = grad_uy[0]  
+        J_21 = grad_uy[2]     # dx
+        J_22 = 1 + grad_uy[1] # dy
+        J_23 = grad_uy[0]     # dz
         
-        J_31 = grad_uz[2]  
-        J_32 = grad_uz[1]  
-        J_33 = 1 + grad_uz[0]
+        J_31 = grad_uz[2]     # dx
+        J_32 = grad_uz[1]     # dy
+        J_33 = 1 + grad_uz[0] # dz
         
         det = J_11 * (J_22 * J_33 - J_23 * J_32) \
             - J_12 * (J_21 * J_33 - J_23 * J_31) \
@@ -207,9 +209,11 @@ def train(args):
     
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     
+    # --- Instantiate all losses ---
     ncc_loss = NCCLoss().to(rank)
     grad_loss = GradientSmoothingLoss().to(rank)
     inv_cons_loss = InverseConsistencyLoss(size=(128, 128, 128)).to(rank)
+    vol_loss = VolumeConservationLoss().to(rank) # New volume loss
     
     dice_metric = DiceMetric(include_background=True, reduction="mean", get_not_nans=False)
     scaler = torch.amp.GradScaler('cuda')
@@ -231,13 +235,20 @@ def train(args):
                 warped_inhale, dvf_i_to_e, svf_i_to_e = ddp_model(inhale, exhale)
                 warped_exhale, dvf_e_to_i, svf_e_to_i = ddp_model(exhale, inhale)
 
+                # --- Calculate all loss components ---
                 loss_sim_i = ncc_loss(warped_inhale, exhale, mask=exhale_mask)
                 loss_sim_e = ncc_loss(warped_exhale, inhale, mask=inhale_mask)
                 loss_reg = grad_loss(dvf_i_to_e) + grad_loss(dvf_e_to_i)
                 loss_cycle = inv_cons_loss(dvf_i_to_e, dvf_e_to_i)
+                
+                # Apply volume conservation loss ONLY to the forward (Inhale -> Exhale) pass
+                loss_vol_i = vol_loss(dvf_i_to_e, inhale_mask, exhale_mask) 
+                
+                # --- Sum total loss ---
                 total_loss = (loss_sim_i + loss_sim_e) + \
                             args.lambda_cycle * loss_cycle + \
-                            args.alpha * loss_reg
+                            args.alpha * loss_reg + \
+                            args.lambda_expansion * loss_vol_i
 
             scaler.scale(total_loss).backward()
             scaler.step(optimizer)
@@ -252,6 +263,7 @@ def train(args):
                     "loss_similarity_fwd": loss_sim_i.item(),
                     "loss_similarity_bwd": loss_sim_e.item(),
                     "loss_regularization": loss_reg.item(),
+                    "loss_volume_fwd": loss_vol_i.item(), # Log new loss
                 })
 
         # --- VALIDATION ---
@@ -318,8 +330,9 @@ if __name__ == '__main__':
     parser.add_argument('--n_workers', type=int, default=8)
     parser.add_argument('--val_interval', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--alpha', type=float, default=1.0)
-    parser.add_argument('--lambda_cycle', type=float, default=1.0)
+    parser.add_argument('--alpha', type=float, default=1.0, help="Weight for smoothness loss (L_reg)")
+    parser.add_argument('--lambda_cycle', type=float, default=1.0, help="Weight for cycle consistency loss")
+    parser.add_argument('--lambda_expansion', type=float, default=1.0, help="Weight for the volume conservation loss")
     parser.add_argument('--dataset_fraction', type=float, default=1.0)
     parser.add_argument('--latent_dim', type=int, default=16)
     args = parser.parse_args()

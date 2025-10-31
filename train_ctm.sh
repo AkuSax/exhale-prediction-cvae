@@ -1,10 +1,10 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES="0,1"
-save_dir="model_runs/ctm_run_2"
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
+save_dir="model_runs/ctm_run_3"
 mkdir -p $save_dir
 
-nohup torchrun --nproc_per_node=2 train_ctm.py \
+nohup torchrun --nproc_per_node=4 train_ctm.py \
     --data_dir "/mnt/hot/public/Akul/exhale_pred_data" \
     --save_dir $save_dir \
     --epochs 200 \
@@ -14,4 +14,5 @@ nohup torchrun --nproc_per_node=2 train_ctm.py \
     --lr 1e-4 \
     --dataset_fraction 0.2 \
     --alpha 2.0 \
-    --lambda_cycle 1.0 > $save_dir/train.log 2>&1 &
+    --lambda_cycle 1.0 \
+    --lambda_volume 1.0 > $save_dir/train.log 2>&1 &
