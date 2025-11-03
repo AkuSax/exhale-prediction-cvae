@@ -15,4 +15,4 @@ nohup torchrun --nproc_per_node=4 train_ctm.py \
     --dataset_fraction 0.2 \
     --alpha 2.0 \
     --lambda_cycle 1.0 \
-    --lambda_volume 1.0 > $save_dir/train.log 2>&1 &
+    --lambda_expansion 10.0 > $save_dir/train.log 2>&1 &

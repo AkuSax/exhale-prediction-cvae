@@ -5,7 +5,7 @@ base_data_dir="/mnt/hot/public/Akul/exhale_pred_data"
 base_port=29500
 
 alphas=(2.0 2.0 2.0 2.0)
-lambda_expansions=(0.1 1.0 5.0) # Test 0.0 (baseline), 0.1 (gentle), 1.0 (medium), 5.0 (strong)
+lambda_expansions=(0.1 1.0 5.0 20.0) # Test 0.0 (baseline), 0.1 (gentle), 1.0 (medium), 5.0 (strong)
 
 echo "Launching ${#alphas[@]} training jobs sequentially"
 

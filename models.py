@@ -61,15 +61,12 @@ class CycleTransMorph(nn.Module):
         if isinstance(transformer_output, (list, tuple)):
             transformer_features = transformer_output[0]
         else:
-            transformer_features = transformer_output
-
-        # FIX: Permute the backbone output to correct swapped (Width, Depth) dimensions.
-        transformer_features = transformer_features.permute(0, 1, 2, 4, 3)
-
+            transformer_features = transformer_output        
         svf = self.svf_head(transformer_features)
         dvf = self.diffeomorphic_layer(svf)
         warped_image = self.spatial_transformer(moving, dvf)
         return warped_image, dvf, svf
+
 class SpatialTransformer(nn.Module):
     """
     N-D Spatial Transformer, robust to DDP.

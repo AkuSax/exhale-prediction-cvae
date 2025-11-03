@@ -142,18 +142,13 @@ class VolumeConservationLoss(nn.Module):
         return det
 
     def forward(self, dvf, inhale_mask, exhale_mask):
-        # Calculate determinant map
-        det = self._get_det(dvf) # Shape (B, D, H, W)
         
-        # Calculate mean determinant for each item in the batch
-        # We average over the whole volume, not just the mask
+        det = self._get_det(dvf) # Shape (B, D, H, W)
         avg_det = torch.mean(det, dim=(1, 2, 3)) # Shape (B)
         
-        # Calculate target volume ratio for each item in the batch
         v_inhale = torch.sum(inhale_mask, dim=(1, 2, 3, 4)) # Shape (B)
         v_exhale = torch.sum(exhale_mask, dim=(1, 2, 3, 4)) # Shape (B)
         
         target_ratio = v_exhale / (v_inhale + self.epsilon) # Shape (B)
         
-        # Return the L2 (MSE) loss between the average det and the target ratio
         return F.mse_loss(avg_det, target_ratio)
