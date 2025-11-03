@@ -1,0 +1,45 @@
+# sweep.yaml
+program: train_ctm.py
+method: hyperband 
+metric:
+  name: val_dice_score
+  goal: maximize
+
+parameters:
+  lr:
+    distribution: log_uniform_values
+    min: 1e-5
+    max: 5e-4
+  alpha:
+    distribution: uniform
+    min: 0.5
+    max: 4.0
+  lambda_cycle:
+    distribution: uniform
+    min: 0.5
+    max: 2.0
+  lambda_expansion:
+    distribution: uniform
+    min: -0.8
+    max: -0.1
+
+command:
+  - ${env}           # Environment variables
+  - torchrun         # Your multi-GPU launcher
+  - --nproc_per_node=4
+  - ${program}       # Calls 'train_ctm.py'
+  - ${args}          # Passes the swept parameters (e.g., --lr=...)
+  
+  # --- ALL STATIC (non-swept) arguments go here ---
+  - --data_dir
+  - "/mnt/hot/public/Akul/exhale_pred_data_10pct"
+  - --epochs
+  - "50"  # Hyperband will stop this early for bad runs
+  - --batch_size
+  - "1"
+  - --n_workers
+  - "8"
+  - --val_interval
+  - "2"
+  - --dataset_fraction
+  - "1"
