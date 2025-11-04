@@ -288,7 +288,7 @@ def train(args):
 
                     if rank == 0:
                         if i == 0: # Log images and jacobian for the first validation batch only
-                            save_and_log_images(args.save_dir, epoch, inhale[0], exhale[0], warped_inhale[0])
+                            #save_and_log_images(args.save_dir, epoch, inhale[0], exhale[0], warped_inhale[0])
                             jacobian_stats = get_jacobian_stats(dvf_i_to_e)
                             wandb.log(jacobian_stats)
 
