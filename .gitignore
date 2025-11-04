@@ -14,7 +14,7 @@ gif_frames_ortho/
 
 # Saved Models
 /model_runs
-/wandb
+/wandb*
 *.pth
 *.pt
 

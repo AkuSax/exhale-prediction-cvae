@@ -1,11 +1,12 @@
-# sweep.yaml
+# sweep.yaml (Fixed for save_dir error and scheduler warning)
 program: train_ctm.py
-method: hyperband 
+method: random  # Using random search. This is simple and effective.
 metric:
   name: val_dice_score
   goal: maximize
 
 parameters:
+  # --- Hyperparameters to Sweep ---
   lr:
     distribution: log_uniform_values
     min: 1e-5
@@ -23,6 +24,7 @@ parameters:
     min: -0.8
     max: -0.1
 
+# --- How to run your script ---
 command:
   - ${env}           # Environment variables
   - torchrun         # Your multi-GPU launcher
@@ -33,13 +35,20 @@ command:
   # --- ALL STATIC (non-swept) arguments go here ---
   - --data_dir
   - "/mnt/hot/public/Akul/exhale_pred_data_10pct"
+  
+  # --- THIS IS THE FIX ---
+  # We add a dummy save_dir. Your Python code will overwrite this.
+  - --save_dir
+  - "wandb_save" 
+  # ---------------------
+
   - --epochs
-  - "50"  # Hyperband will stop this early for bad runs
+  - "50"
   - --batch_size
-  - "1"
+  - "4"
   - --n_workers
   - "8"
   - --val_interval
-  - "2"
+  - "1"
   - --dataset_fraction
   - "1"
