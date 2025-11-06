@@ -8,7 +8,6 @@ import glob
 import random
 import argparse
 import numpy as np
-import nibabel as nib
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -279,7 +278,7 @@ def train(args):
 
                     with torch.amp.autocast('cuda'):
                         warped_inhale, dvf_i_to_e, _ = ddp_model(inhale, exhale)
-                        warped_inhale_mask = ddp_model.module.spatial_transformer(inhale_mask, dvf_i_to_e)
+                        warped_inhale_mask = ddp_model.module.mask_transformer(inhale_mask, dvf_i_to_e)
 
                     # All ranks must participate in metric calculation
                     warped_mask_binary = (warped_inhale_mask > 0.5).float()

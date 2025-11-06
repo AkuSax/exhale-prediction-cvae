@@ -10,7 +10,7 @@ checkpoints/
 *.npy
 *.nii.gz
 *.gif
-gif_frames_ortho/
+*.png
 
 # Saved Models
 /model_runs

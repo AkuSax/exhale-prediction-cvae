@@ -19,8 +19,8 @@ parameters:
     max: 2.0
   lambda_expansion:
     distribution: uniform
-    min: -0.8
-    max: -0.1
+    min: 0.1
+    max: 2.0
 
 command:
   - ${env}           # Environment variables
@@ -36,7 +36,7 @@ command:
   - --epochs
   - "50"
   - --batch_size
-  - "3"
+  - "5"
   - --n_workers
   - "8"
   - --val_interval

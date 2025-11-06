@@ -7,10 +7,12 @@ import SimpleITK as sitk  # Import the new library
 from tqdm import tqdm
 
 # --- Configuration ---
-RAW_DATA_ROOT = Path("/hot/public/COPDGene-1")
+RAW_DATA_ROOT = Path("/mnt/hot/public/COPDGene-1")
 TARGET_SHAPE = (128, 128, 128)
-# Define a target spacing (e.g., 1.5x1.5x1.5 mm) as recommended [cite: 214]
-TARGET_SPACING = (1.5, 1.5, 1.5)
+# --- FIX ---
+# Define a target spacing based on our analysis to prevent cropping
+TARGET_SPACING = (4.2369140625, 4.2369140625, 4.2369140625)
+# --- END FIX ---
 
 def normalize_scan(scan_data: np.ndarray) -> np.ndarray:
     """
@@ -25,7 +27,6 @@ def resample_and_pad(nii_path: Path, is_mask: bool) -> np.ndarray:
     """
     Loads a NIfTI file, resamples it to a target isotropic spacing,
     and then pads or crops it to a target shape.
-    This logic is based on the expert review's recommendation [cite: 205-219].
     """
     # Load the image using SimpleITK to easily access metadata
     itk_image = sitk.ReadImage(str(nii_path))

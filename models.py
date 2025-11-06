@@ -53,6 +53,7 @@ class CycleTransMorph(nn.Module):
         self.svf_head.bias = nn.Parameter(torch.zeros(self.svf_head.bias.shape))
         self.diffeomorphic_layer = ScalingAndSquaring(size=self.img_size, scaling_steps=7)
         self.spatial_transformer = SpatialTransformer(size=self.img_size)
+        self.mask_transformer = SpatialTransformer(size=self.img_size, mode='nearest')
 
     def forward(self, moving, fixed):
         x = torch.cat([moving, fixed], dim=1)
