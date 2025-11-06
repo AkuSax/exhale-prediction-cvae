@@ -9,8 +9,6 @@ from tqdm import tqdm
 # --- Configuration ---
 RAW_DATA_ROOT = Path("/mnt/hot/public/COPDGene-1")
 TARGET_SHAPE = (128, 128, 128)
-# --- FIX ---
-# Define a target spacing based on our analysis to prevent cropping
 TARGET_SPACING = (4.2369140625, 4.2369140625, 4.2369140625)
 # --- END FIX ---
 
