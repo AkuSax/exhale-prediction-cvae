@@ -1,4 +1,4 @@
-# Exhale Prediction CVAE (CycleTransMorph)
+# CycleTransMorph: Diffeomorphic Registration for Exhale CT Prediction
 
 This repository implements a deep learning framework for predicting Exhale CT scans from Inhale CT scans (and vice versa) using **CycleTransMorph (CTM)**. The model leverages a SwinUNETR backbone to predict diffeomorphic deformation fields, allowing for topology-preserving image registration and synthesis between respiratory states.
 
